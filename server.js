@@ -2,8 +2,10 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
-import { existsSync as fsExists, mkdirSync } from "fs";
+import { existsSync as fsExists, mkdirSync, readdirSync, statSync, unlinkSync, readFileSync, writeFileSync } from "fs";
+import multer from "multer";
 import {
   getAuthUrl, exchangeCode, getToken, removeToken, loadTokens,
   postContent, postComment, likePost, getValidToken,
@@ -16,16 +18,350 @@ import {
   generateImage, generateAIVideo, generateFullMedia, buildImagePrompt,
 } from "./ai-media.js";
 import {
-  schedulePost, cancelJob, scheduleRecurring, getSchedulerStatus, addLog,
+  schedulePost, cancelJob, scheduleRecurring, getSchedulerStatus, addLog, loadLog,
 } from "./scheduler.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "output");
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+const POSTS_DB = path.join(__dirname, "posts.json");
 if (!fsExists(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
+if (!fsExists(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// --- Security: Rate limiting (simple in-memory) ---
+const rateLimits = new Map();
+function rateLimit(key, maxPerMinute = 30) {
+  const now = Date.now();
+  const window = 60_000;
+  const hits = rateLimits.get(key) || [];
+  const recent = hits.filter(t => now - t < window);
+  if (recent.length >= maxPerMinute) return false;
+  recent.push(now);
+  rateLimits.set(key, recent);
+  return true;
+}
+
+// --- Secure File Upload ---
+const ALLOWED_MIME_TYPES = new Set([
+  "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml",
+  "video/mp4", "video/webm", "video/quicktime",
+  "audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4", "audio/webm",
+]);
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+    filename: (_req, file, cb) => {
+      // Sanitize: strip path separators, use crypto ID + safe extension
+      const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, "");
+      const safeExts = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".mp4", ".webm", ".mov", ".mp3", ".wav", ".ogg", ".m4a"];
+      const finalExt = safeExts.includes(ext) ? ext : "";
+      cb(null, `${crypto.randomUUID()}${finalExt}`);
+    },
+  }),
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      return cb(new Error(`Dateityp nicht erlaubt: ${file.mimetype}`));
+    }
+    cb(null, true);
+  },
+});
+
+// Serve uploaded files
+app.use("/uploads", express.static(UPLOADS_DIR));
+
+// --- Posts Database (JSON file) ---
+function loadPosts() {
+  if (fsExists(POSTS_DB)) return JSON.parse(readFileSync(POSTS_DB, "utf-8"));
+  return [];
+}
+
+function savePosts(posts) {
+  writeFileSync(POSTS_DB, JSON.stringify(posts, null, 2));
+}
+
+// === MEDIA UPLOAD & LIBRARY ===
+
+// Upload files (max 5 at once)
+app.post("/api/media/upload", (req, res) => {
+  if (!rateLimit(req.ip, 60)) return res.status(429).json({ error: "Zu viele Uploads. Bitte warte kurz." });
+
+  upload.array("files", 5)(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ error: "Datei zu gross (max 100MB)" });
+      return res.status(400).json({ error: err.message });
+    }
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: "Keine Dateien hochgeladen" });
+
+    const uploaded = req.files.map(f => ({
+      id: path.basename(f.filename, path.extname(f.filename)),
+      filename: f.filename,
+      originalName: f.originalname.replace(/[<>:"/\\|?*]/g, "_"), // sanitize for display
+      mimetype: f.mimetype,
+      size: f.size,
+      type: f.mimetype.startsWith("image/") ? "image" : f.mimetype.startsWith("video/") ? "video" : "audio",
+      url: `/uploads/${f.filename}`,
+      uploadedAt: new Date().toISOString(),
+    }));
+
+    res.json({ success: true, files: uploaded });
+  });
+});
+
+// List all uploaded media
+app.get("/api/media/library", (_req, res) => {
+  try {
+    const files = readdirSync(UPLOADS_DIR)
+      .filter(f => !f.startsWith("."))
+      .map(f => {
+        const stat = statSync(path.join(UPLOADS_DIR, f));
+        const ext = path.extname(f).toLowerCase();
+        const imageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"];
+        const videoExts = [".mp4", ".webm", ".mov"];
+        const type = imageExts.includes(ext) ? "image" : videoExts.includes(ext) ? "video" : "audio";
+        return {
+          id: path.basename(f, ext),
+          filename: f,
+          type,
+          size: stat.size,
+          url: `/uploads/${f}`,
+          uploadedAt: stat.birthtime.toISOString(),
+        };
+      })
+      .sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+
+    res.json({ files });
+  } catch {
+    res.json({ files: [] });
+  }
+});
+
+// Delete a media file
+app.delete("/api/media/:filename", (req, res) => {
+  const filename = path.basename(req.params.filename); // prevent path traversal
+  const filePath = path.join(UPLOADS_DIR, filename);
+
+  // Double-check: resolved path must be inside UPLOADS_DIR
+  if (!path.resolve(filePath).startsWith(path.resolve(UPLOADS_DIR))) {
+    return res.status(403).json({ error: "Zugriff verweigert" });
+  }
+
+  if (!fsExists(filePath)) return res.status(404).json({ error: "Datei nicht gefunden" });
+
+  try {
+    unlinkSync(filePath);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// === POST MANAGEMENT ===
+
+// Create a new post
+app.post("/api/posts", (req, res) => {
+  if (!rateLimit(req.ip, 30)) return res.status(429).json({ error: "Rate limit" });
+
+  const { text, media, platforms, scheduledAt, tags } = req.body;
+  if (!text && (!media || media.length === 0)) {
+    return res.status(400).json({ error: "Text oder Medien erforderlich" });
+  }
+
+  // Validate text length
+  if (text && text.length > 10000) {
+    return res.status(400).json({ error: "Text zu lang (max 10.000 Zeichen)" });
+  }
+
+  // Validate media references exist
+  if (media && Array.isArray(media)) {
+    for (const m of media) {
+      const safeName = path.basename(m.filename || "");
+      const filePath = path.join(UPLOADS_DIR, safeName);
+      if (!fsExists(filePath)) {
+        return res.status(400).json({ error: `Mediendatei nicht gefunden: ${safeName}` });
+      }
+    }
+  }
+
+  const post = {
+    id: crypto.randomUUID(),
+    text: text || "",
+    media: (media || []).map(m => ({
+      ...m,
+      filename: path.basename(m.filename || ""), // sanitize
+    })),
+    platforms: platforms || [],
+    tags: tags || [],
+    status: scheduledAt ? "scheduled" : "draft",
+    scheduledAt: scheduledAt || null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    postedAt: null,
+    postResults: null,
+  };
+
+  const posts = loadPosts();
+  posts.unshift(post);
+  savePosts(posts);
+
+  // If scheduled, register with scheduler
+  if (scheduledAt) {
+    schedulePost({
+      id: `post-${post.id}`,
+      content: post.text,
+      platforms: post.platforms,
+      scheduledAt,
+    });
+  }
+
+  res.json({ success: true, post });
+});
+
+// Get all posts (with optional status filter)
+app.get("/api/posts", (req, res) => {
+  const posts = loadPosts();
+  const { status } = req.query;
+  const filtered = status ? posts.filter(p => p.status === status) : posts;
+  res.json({ posts: filtered });
+});
+
+// Get a single post
+app.get("/api/posts/:id", (req, res) => {
+  const posts = loadPosts();
+  const post = posts.find(p => p.id === req.params.id);
+  if (!post) return res.status(404).json({ error: "Post nicht gefunden" });
+  res.json(post);
+});
+
+// Update a post
+app.put("/api/posts/:id", (req, res) => {
+  const posts = loadPosts();
+  const idx = posts.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "Post nicht gefunden" });
+
+  const post = posts[idx];
+  if (post.status === "posted") return res.status(400).json({ error: "Bereits gepostete Posts koennen nicht bearbeitet werden" });
+
+  const { text, media, platforms, scheduledAt, tags, status } = req.body;
+
+  if (text !== undefined) post.text = text.slice(0, 10000);
+  if (media !== undefined) post.media = media.map(m => ({ ...m, filename: path.basename(m.filename || "") }));
+  if (platforms !== undefined) post.platforms = platforms;
+  if (tags !== undefined) post.tags = tags;
+  if (status && ["draft", "scheduled"].includes(status)) post.status = status;
+  if (scheduledAt !== undefined) {
+    post.scheduledAt = scheduledAt;
+    if (scheduledAt) {
+      post.status = "scheduled";
+      // Cancel old schedule, create new one
+      cancelJob(`post-${post.id}`);
+      schedulePost({
+        id: `post-${post.id}`,
+        content: post.text,
+        platforms: post.platforms,
+        scheduledAt,
+      });
+    } else {
+      post.status = "draft";
+      cancelJob(`post-${post.id}`);
+    }
+  }
+  post.updatedAt = new Date().toISOString();
+  posts[idx] = post;
+  savePosts(posts);
+  res.json({ success: true, post });
+});
+
+// Delete a post
+app.delete("/api/posts/:id", (req, res) => {
+  const posts = loadPosts();
+  const idx = posts.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "Post nicht gefunden" });
+
+  // Cancel any scheduled job
+  cancelJob(`post-${posts[idx].id}`);
+  posts.splice(idx, 1);
+  savePosts(posts);
+  res.json({ success: true });
+});
+
+// Publish a post immediately
+app.post("/api/posts/:id/publish", async (req, res) => {
+  if (!rateLimit(req.ip, 10)) return res.status(429).json({ error: "Rate limit" });
+
+  const posts = loadPosts();
+  const idx = posts.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "Post nicht gefunden" });
+
+  const post = posts[idx];
+  if (post.status === "posted") return res.status(400).json({ error: "Bereits gepostet" });
+  if (post.platforms.length === 0) return res.status(400).json({ error: "Keine Plattformen ausgewaehlt" });
+
+  const results = {};
+  for (const platform of post.platforms) {
+    try {
+      // Build payload with media
+      const payload = { text: post.text };
+      const imageMedia = post.media.find(m => m.type === "image");
+      if (imageMedia) payload.imageUrl = `http://localhost:${process.env.PORT || 3001}${imageMedia.url}`;
+
+      results[platform] = await postContent(platform, payload);
+    } catch (err) {
+      results[platform] = { success: false, error: err.message };
+    }
+  }
+
+  post.status = "posted";
+  post.postedAt = new Date().toISOString();
+  post.postResults = results;
+  posts[idx] = post;
+  savePosts(posts);
+
+  // Cancel any scheduled job
+  cancelJob(`post-${post.id}`);
+
+  addLog({ type: "own_post_published", postId: post.id, platforms: post.platforms, results });
+  res.json({ success: true, results });
+});
+
+// Duplicate a post
+app.post("/api/posts/:id/duplicate", (req, res) => {
+  const posts = loadPosts();
+  const original = posts.find(p => p.id === req.params.id);
+  if (!original) return res.status(404).json({ error: "Post nicht gefunden" });
+
+  const dupe = {
+    ...original,
+    id: crypto.randomUUID(),
+    status: "draft",
+    scheduledAt: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    postedAt: null,
+    postResults: null,
+  };
+  posts.unshift(dupe);
+  savePosts(posts);
+  res.json({ success: true, post: dupe });
+});
+
+// Get post stats
+app.get("/api/posts/stats/overview", (_req, res) => {
+  const posts = loadPosts();
+  res.json({
+    total: posts.length,
+    drafts: posts.filter(p => p.status === "draft").length,
+    scheduled: posts.filter(p => p.status === "scheduled").length,
+    posted: posts.filter(p => p.status === "posted").length,
+  });
+});
 
 const MODELS = {
   // Anthropic
@@ -151,12 +487,12 @@ import {
   pickTemplate,
   generatePostSchedule,
 } from "./engagement-engine.js";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+// readFileSync, writeFileSync, existsSync already imported at top
 
 const CONFIG_PATH = "./engagement-config.json";
 
 function loadEngagementConfig() {
-  if (existsSync(CONFIG_PATH)) {
+  if (fsExists(CONFIG_PATH)) {
     return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
   }
   return {
@@ -521,7 +857,6 @@ app.post("/api/video/render-sync", async (req, res) => {
 
 // List rendered videos
 app.get("/api/video/list", (_req, res) => {
-  const { readdirSync, statSync } = require("fs");
   try {
     const files = readdirSync(OUTPUT_DIR)
       .filter(f => f.endsWith(".mp4"))
@@ -749,9 +1084,8 @@ app.get("/api/schedule/status", (_req, res) => {
 
 // Job-Log
 app.get("/api/log", (_req, res) => {
-  const { loadLog: getLog } = require("./scheduler.js");
   try {
-    res.json(getLog());
+    res.json(loadLog());
   } catch {
     res.json([]);
   }

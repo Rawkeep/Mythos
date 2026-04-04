@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import MyPosts from "./my-posts.jsx";
 
 const TOPICS = [
   { id: "export", label: "Export & Logistik", emoji: "🚢", color: "#E8A838" },
@@ -156,6 +157,7 @@ function GradientOrb({ color, size, x, y, delay }) {
 }
 
 export default function FacelessContentFactory() {
+  const [mainView, setMainView] = useState("factory"); // factory, myposts
   const [step, setStep] = useState(0); // 0=topic, 1=format, 2=style, 3=generating, 4=result
   const [topic, setTopic] = useState(null);
   const [topicCustom, setTopicCustom] = useState("");
@@ -498,6 +500,14 @@ export default function FacelessContentFactory() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setMainView(mainView === "myposts" ? "factory" : "myposts")} className="action-btn" style={{
+            background: mainView === "myposts" ? "rgba(232,168,56,0.2)" : "rgba(255,255,255,0.06)",
+            border: mainView === "myposts" ? "1px solid #E8A83844" : "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 10, padding: "8px 12px",
+            color: mainView === "myposts" ? "#E8A838" : "#888", fontSize: 13,
+          }}>
+            📋 Posts
+          </button>
           <button onClick={() => setShowSettings(!showSettings)} className="action-btn" style={{
             background: "rgba(155,89,182,0.12)",
             border: "1px solid #9B59B633",
@@ -535,7 +545,7 @@ export default function FacelessContentFactory() {
       </div>
 
       {/* Progress */}
-      {step < 4 && !showHistory && (
+      {mainView === "factory" && step < 4 && !showHistory && (
         <div style={{ padding: "0 20px", position: "relative", zIndex: 10 }}>
           <div style={{ display: "flex", gap: 4 }}>
             {[0, 1, 2, 3].map(s => (
@@ -839,8 +849,13 @@ export default function FacelessContentFactory() {
       )}
 
       <div style={{ padding: "16px 20px 40px", position: "relative", zIndex: 10 }}>
+        {/* My Posts View */}
+        {mainView === "myposts" && (
+          <MyPosts platformStatus={platformStatus} />
+        )}
+
         {/* History Panel */}
-        {showHistory && (
+        {mainView === "factory" && showHistory && (
           <div style={{ animation: "fadeUp 0.3s ease" }}>
             <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, color: "#fff", marginBottom: 16 }}>Letzte Kreationen</h2>
             {history.map((h, i) => (
@@ -868,7 +883,7 @@ export default function FacelessContentFactory() {
         )}
 
         {/* Step 0: Topic */}
-        {step === 0 && !showHistory && (
+        {mainView === "factory" && step === 0 && !showHistory && (
           <div style={{ animation: "fadeUp 0.4s ease" }}>
             <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 24, color: "#fff", marginBottom: 4 }}>
               Worueber soll dein Post sein?
@@ -935,7 +950,7 @@ export default function FacelessContentFactory() {
         )}
 
         {/* Step 1: Format */}
-        {step === 1 && !showHistory && (
+        {mainView === "factory" && step === 1 && !showHistory && (
           <div style={{ animation: "fadeUp 0.4s ease" }}>
             <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 24, color: "#fff", marginBottom: 4 }}>
               Welche Art von Post?
@@ -970,7 +985,7 @@ export default function FacelessContentFactory() {
         )}
 
         {/* Step 2: Style */}
-        {step === 2 && !showHistory && (
+        {mainView === "factory" && step === 2 && !showHistory && (
           <div style={{ animation: "fadeUp 0.4s ease" }}>
             <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 24, color: "#fff", marginBottom: 4 }}>
               Welcher Stil?
@@ -1013,7 +1028,7 @@ export default function FacelessContentFactory() {
         )}
 
         {/* Step 3: Loading */}
-        {step === 3 && !showHistory && (
+        {mainView === "factory" && step === 3 && !showHistory && (
           <div style={{ textAlign: "center", paddingTop: 60, animation: "fadeUp 0.4s ease" }}>
             <div style={{
               width: 64, height: 64, margin: "0 auto 24px",
@@ -1038,7 +1053,7 @@ export default function FacelessContentFactory() {
         )}
 
         {/* Step 4: Result */}
-        {step === 4 && !showHistory && (
+        {mainView === "factory" && step === 4 && !showHistory && (
           <div style={{ animation: "fadeUp 0.4s ease" }}>
             {error ? (
               <div className="glass" style={{ borderRadius: 14, padding: 20, borderColor: "#E74C3C33" }}>

@@ -6,4 +6,6 @@ platform-tokens.json
 engagement-config.json
 scheduled-jobs.json
 job-log.json
+posts.json
+uploads/
 .DS_Store
