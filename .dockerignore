@@ -1,0 +1,13 @@
+node_modules
+dist
+.env
+uploads/*
+output/*
+posts.json
+platform-tokens.json
+engagement-config.json
+scheduled-jobs.json
+job-log.json
+.git
+.DS_Store
+.claude

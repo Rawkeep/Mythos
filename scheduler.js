@@ -77,7 +77,8 @@ async function executeJob(job) {
 
   for (const platform of job.platforms) {
     try {
-      const resp = await fetch(`http://localhost:3001/api/platforms/${platform}/post`, {
+      const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3001}`;
+      const resp = await fetch(`${backendUrl}/api/platforms/${platform}/post`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: job.content }),

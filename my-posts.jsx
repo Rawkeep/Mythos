@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API = "http://localhost:3001";
+const API = "";
 
 const STATUS_LABELS = {
   draft: { label: "Entwurf", color: "#888", icon: "📝" },

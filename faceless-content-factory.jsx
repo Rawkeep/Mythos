@@ -180,7 +180,7 @@ export default function FacelessContentFactory() {
   const resultRef = useRef(null);
 
   useEffect(() => {
-    fetch("http://localhost:3001/api/models")
+    fetch("/api/models")
       .then(r => r.json())
       .then(d => setModels(d.models || []))
       .catch(() => {});
@@ -188,7 +188,7 @@ export default function FacelessContentFactory() {
 
   useEffect(() => {
     if (showEngagement) {
-      fetch("http://localhost:3001/api/engagement/config")
+      fetch("/api/engagement/config")
         .then(r => r.json())
         .then(setEngConfig)
         .catch(() => {});
@@ -198,7 +198,7 @@ export default function FacelessContentFactory() {
   const updatePersonality = (key, value) => {
     const updated = { ...engConfig.personality, [key]: value };
     setEngConfig({ ...engConfig, personality: updated });
-    fetch("http://localhost:3001/api/engagement/personality", {
+    fetch("/api/engagement/personality", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updated),
@@ -210,7 +210,7 @@ export default function FacelessContentFactory() {
       r.id === ruleId ? { ...r, enabled: !r.enabled } : r
     );
     setEngConfig({ ...engConfig, rules });
-    fetch("http://localhost:3001/api/engagement/rules", {
+    fetch("/api/engagement/rules", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rules }),
@@ -218,7 +218,7 @@ export default function FacelessContentFactory() {
   };
 
   const toggleEngagement = () => {
-    fetch("http://localhost:3001/api/engagement/toggle", {
+    fetch("/api/engagement/toggle", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ active: !engConfig.active }),
@@ -229,7 +229,7 @@ export default function FacelessContentFactory() {
 
   const testGenerateReply = () => {
     setTestLoading(true);
-    fetch("http://localhost:3001/api/engagement/generate-reply", {
+    fetch("/api/engagement/generate-reply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -256,7 +256,7 @@ export default function FacelessContentFactory() {
     const prompt = buildPrompt(topic, topicCustom, format, style, lang);
 
     try {
-      const response = await fetch("http://localhost:3001/api/generate", {
+      const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelId: selectedModel, prompt }),
@@ -293,7 +293,7 @@ export default function FacelessContentFactory() {
   const [videoFormat, setVideoFormat] = useState("vertical"); // vertical, square, landscape
 
   useEffect(() => {
-    fetch("http://localhost:3001/api/platforms")
+    fetch("/api/platforms")
       .then(r => r.json())
       .then(setPlatformStatus)
       .catch(() => {});
@@ -308,12 +308,12 @@ export default function FacelessContentFactory() {
   ];
 
   const connectPlatform = async (platformId) => {
-    const resp = await fetch(`http://localhost:3001/auth/${platformId}/connect`).then(r => r.json());
+    const resp = await fetch(`/auth/${platformId}/connect`).then(r => r.json());
     if (resp.authUrl) window.open(resp.authUrl, "_blank");
   };
 
   const disconnectPlatform = async (platformId) => {
-    await fetch(`http://localhost:3001/auth/${platformId}/disconnect`, { method: "POST" });
+    await fetch(`/auth/${platformId}/disconnect`, { method: "POST" });
     setPlatformStatus(prev => ({ ...prev, [platformId]: { ...prev[platformId], connected: false, name: null } }));
   };
 
@@ -330,7 +330,7 @@ export default function FacelessContentFactory() {
 
     setPostingTo(platformId);
     try {
-      const resp = await fetch(`http://localhost:3001/api/platforms/${platformId}/post`, {
+      const resp = await fetch(`/api/platforms/${platformId}/post`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: result }),
@@ -350,7 +350,7 @@ export default function FacelessContentFactory() {
 
     setPostingTo("all");
     try {
-      const resp = await fetch("http://localhost:3001/api/platforms/post-all", {
+      const resp = await fetch("/api/platforms/post-all", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: result, platforms: connected }),
@@ -368,7 +368,7 @@ export default function FacelessContentFactory() {
     setVideoRendering(true);
     setVideoResult(null);
     try {
-      const resp = await fetch("http://localhost:3001/api/video/render-sync", {
+      const resp = await fetch("/api/video/render-sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1140,7 +1140,7 @@ export default function FacelessContentFactory() {
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
                     <button onClick={() => {
                       setVideoRendering(true); setVideoResult(null);
-                      fetch("http://localhost:3001/api/media/image", {
+                      fetch("/api/media/image", {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ topic, style: "cinematic", aspectRatio: videoFormat === "landscape" ? "landscape" : videoFormat === "square" ? "square" : "portrait" }),
                       }).then(r => r.json()).then(d => setVideoResult(d)).finally(() => setVideoRendering(false));
@@ -1154,11 +1154,11 @@ export default function FacelessContentFactory() {
 
                     <button onClick={() => {
                       setVideoRendering(true); setVideoResult(null);
-                      fetch("http://localhost:3001/api/media/video", {
+                      fetch("/api/media/video", {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
                           prompt: `${result.slice(0, 100)}, cinematic motion, professional, faceless content`,
-                          imageUrl: videoResult?.url ? `http://localhost:3001${videoResult.url}` : undefined,
+                          imageUrl: videoResult?.url ? `${videoResult.url}` : undefined,
                         }),
                       }).then(r => r.json()).then(d => setVideoResult(d)).finally(() => setVideoRendering(false));
                     }} disabled={videoRendering} className="action-btn" style={{
@@ -1171,7 +1171,7 @@ export default function FacelessContentFactory() {
 
                     <button onClick={() => {
                       setVideoRendering(true); setVideoResult(null);
-                      fetch("http://localhost:3001/api/media/full-pipeline", {
+                      fetch("/api/media/full-pipeline", {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ content: result, topic, format, aspectRatio: videoFormat === "landscape" ? "landscape" : videoFormat === "square" ? "square" : "portrait" }),
                       }).then(r => r.json()).then(d => setVideoResult(d)).finally(() => setVideoRendering(false));
@@ -1203,25 +1203,25 @@ export default function FacelessContentFactory() {
                   {videoResult?.success && videoResult?.image && (
                     <div style={{ marginTop: 8 }}>
                       <p style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>AI Bild ({videoResult.image.provider})</p>
-                      <img src={`http://localhost:3001${videoResult.image.url}`} style={{ width: "100%", borderRadius: 10, maxHeight: 250, objectFit: "cover" }} />
+                      <img src={`${videoResult.image.url}`} style={{ width: "100%", borderRadius: 10, maxHeight: 250, objectFit: "cover" }} />
                     </div>
                   )}
 
                   {videoResult?.success && videoResult?.video && (
                     <div style={{ marginTop: 8 }}>
                       <p style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>AI Video ({videoResult.video.provider})</p>
-                      <video src={`http://localhost:3001${videoResult.video.url}`} controls style={{ width: "100%", borderRadius: 10, maxHeight: 300 }} />
+                      <video src={`${videoResult.video.url}`} controls style={{ width: "100%", borderRadius: 10, maxHeight: 300 }} />
                     </div>
                   )}
 
                   {videoResult?.success && videoResult?.url && !videoResult?.image && (
                     <div style={{ marginTop: 8 }}>
                       {videoResult.url.endsWith(".mp4") ? (
-                        <video src={`http://localhost:3001${videoResult.url}`} controls style={{ width: "100%", borderRadius: 10, maxHeight: 300 }} />
+                        <video src={`${videoResult.url}`} controls style={{ width: "100%", borderRadius: 10, maxHeight: 300 }} />
                       ) : (
-                        <img src={`http://localhost:3001${videoResult.url}`} style={{ width: "100%", borderRadius: 10, maxHeight: 300, objectFit: "cover" }} />
+                        <img src={`${videoResult.url}`} style={{ width: "100%", borderRadius: 10, maxHeight: 300, objectFit: "cover" }} />
                       )}
-                      <a href={`http://localhost:3001${videoResult.url}`} download className="action-btn" style={{
+                      <a href={`${videoResult.url}`} download className="action-btn" style={{
                         display: "block", textAlign: "center", marginTop: 6, padding: "8px", borderRadius: 8,
                         background: "#2ECC7118", border: "1px solid #2ECC7133",
                         color: "#2ECC71", fontSize: 12, fontWeight: 600, textDecoration: "none",

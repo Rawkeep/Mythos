@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import compression from "compression";
 import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
@@ -28,9 +30,25 @@ const POSTS_DB = path.join(__dirname, "posts.json");
 if (!fsExists(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
 if (!fsExists(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
 
+const isProduction = process.env.NODE_ENV === "production";
+const PORT = process.env.PORT || 3001;
+const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// Security headers
+app.use(helmet({
+  contentSecurityPolicy: false, // CSP handled by frontend framework
+  crossOriginEmbedderPolicy: false, // allow loading external images/videos
+}));
+
+// Gzip compression
+app.use(compression());
+
+// CORS: restricted in production, open in dev
+app.use(cors(isProduction ? { origin: process.env.APP_URL || false } : undefined));
+
+app.use(express.json({ limit: "1mb" }));
 
 // --- Security: Rate limiting (simple in-memory) ---
 const rateLimits = new Map();
@@ -310,7 +328,7 @@ app.post("/api/posts/:id/publish", async (req, res) => {
       // Build payload with media
       const payload = { text: post.text };
       const imageMedia = post.media.find(m => m.type === "image");
-      if (imageMedia) payload.imageUrl = `http://localhost:${process.env.PORT || 3001}${imageMedia.url}`;
+      if (imageMedia) payload.imageUrl = `${BACKEND_URL}${imageMedia.url}`;
 
       results[platform] = await postContent(platform, payload);
     } catch (err) {
@@ -877,7 +895,7 @@ app.get("/api/video/list", (_req, res) => {
 // Diese Endpoints sind so gebaut, dass n8n sie direkt aufrufen kann
 
 // n8n Webhook: Content generieren lassen
-// In n8n: HTTP Request Node → POST http://localhost:3001/api/webhook/generate
+// In n8n: HTTP Request Node → POST ${BACKEND_URL}/api/webhook/generate
 app.post("/api/webhook/generate", async (req, res) => {
   const { topic, format, style, lang, modelId, callbackUrl } = req.body;
 
@@ -889,7 +907,7 @@ app.post("/api/webhook/generate", async (req, res) => {
     const prompt = `Create social media content about: ${topicLabel}. Format: ${format || "reel-script"}. Style: ${style || "educational"}. Language: ${lang || "de"}`;
 
     const mid = modelId || "claude-sonnet";
-    const response = await fetch("http://localhost:3001/api/generate", {
+    const response = await fetch(`${BACKEND_URL}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ modelId: mid, prompt }),
@@ -914,7 +932,7 @@ app.post("/api/webhook/generate", async (req, res) => {
 });
 
 // n8n Webhook: Direkt auf Plattform posten
-// In n8n: HTTP Request Node → POST http://localhost:3001/api/webhook/post
+// In n8n: HTTP Request Node → POST ${BACKEND_URL}/api/webhook/post
 app.post("/api/webhook/post", async (req, res) => {
   const { text, platforms, callbackUrl } = req.body;
 
@@ -972,7 +990,7 @@ app.post("/api/webhook/full-pipeline", async (req, res) => {
 
   try {
     // 1. Generate content
-    const genResp = await fetch("http://localhost:3001/api/webhook/generate", {
+    const genResp = await fetch(`${BACKEND_URL}/api/webhook/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ topic, format, style }),
@@ -988,7 +1006,7 @@ app.post("/api/webhook/full-pipeline", async (req, res) => {
     // 3. Post to platforms
     let postResults = null;
     if (platforms?.length > 0) {
-      const postResp = await fetch("http://localhost:3001/api/webhook/post", {
+      const postResp = await fetch(`${BACKEND_URL}/api/webhook/post`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: genData.content, platforms }),
@@ -1025,7 +1043,7 @@ app.post("/api/webhook/incoming-comment", async (req, res) => {
 
   try {
     // Generate AI reply
-    const replyResp = await fetch("http://localhost:3001/api/engagement/generate-reply", {
+    const replyResp = await fetch(`${BACKEND_URL}/api/engagement/generate-reply`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ platform, postContent: commentText }),
@@ -1112,17 +1130,57 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
+// --- Production: Serve built frontend ---
+if (isProduction) {
+  const distPath = path.join(__dirname, "dist");
+  app.use(express.static(distPath));
+  // SPA fallback: any non-API route serves index.html
+  app.get("/{*path}", (req, res) => {
+    res.sendFile(path.join(distPath, "index.html"));
+  });
+}
+
+// --- Global error handler ---
+app.use((err, _req, res, _next) => {
+  console.error(`[${new Date().toISOString()}] Error:`, err.message);
+  res.status(err.status || 500).json({
+    error: isProduction ? "Internal server error" : err.message,
+  });
+});
+
+// --- Environment validation ---
+function validateEnv() {
+  const warnings = [];
+  if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+    warnings.push("No AI provider keys set (ANTHROPIC_API_KEY or OPENAI_API_KEY)");
+  }
+  if (isProduction && !process.env.APP_URL) {
+    warnings.push("APP_URL not set — CORS will block all origins in production");
+  }
+  if (warnings.length) {
+    console.warn("\nWarnings:");
+    warnings.forEach(w => console.warn(`  - ${w}`));
+  }
+}
+
+// --- Start server ---
+const server = app.listen(PORT, () => {
+  console.log(`\nMythos ${isProduction ? "[PRODUCTION]" : "[DEV]"} running on port ${PORT}`);
+  if (isProduction) console.log(`  Serving frontend from ./dist`);
+  console.log(`  Backend URL: ${BACKEND_URL}`);
   console.log("\nAI Providers:");
-  console.log(`  Anthropic: ${process.env.ANTHROPIC_API_KEY ? "✓" : "✗ (set ANTHROPIC_API_KEY in .env)"}`);
-  console.log(`  OpenAI:    ${process.env.OPENAI_API_KEY ? "✓" : "✗ (set OPENAI_API_KEY in .env)"}`);
+  console.log(`  Anthropic: ${process.env.ANTHROPIC_API_KEY ? "OK" : "- (set ANTHROPIC_API_KEY in .env)"}`);
+  console.log(`  OpenAI:    ${process.env.OPENAI_API_KEY ? "OK" : "- (set OPENAI_API_KEY in .env)"}`);
   console.log(`  Ollama:    → ${process.env.OLLAMA_BASE_URL || "http://localhost:11434"}`);
   console.log("\nPlatforms:");
-  console.log(`  YouTube:   ${process.env.YOUTUBE_CLIENT_ID ? "✓ credentials" : "✗"}`);
-  console.log(`  X:         ${process.env.X_CLIENT_ID ? "✓ credentials" : "✗"}`);
-  console.log(`  Instagram: ${process.env.META_APP_ID ? "✓ credentials" : "✗"}`);
-  console.log(`  TikTok:    ${process.env.TIKTOK_CLIENT_KEY ? "✓ credentials" : "✗"}`);
-  console.log(`  LinkedIn:  ${process.env.LINKEDIN_CLIENT_ID ? "✓ credentials" : "✗"}`);
+  console.log(`  YouTube:   ${process.env.YOUTUBE_CLIENT_ID ? "OK" : "-"}`);
+  console.log(`  X:         ${process.env.X_CLIENT_ID ? "OK" : "-"}`);
+  console.log(`  Instagram: ${process.env.META_APP_ID ? "OK" : "-"}`);
+  console.log(`  TikTok:    ${process.env.TIKTOK_CLIENT_KEY ? "OK" : "-"}`);
+  console.log(`  LinkedIn:  ${process.env.LINKEDIN_CLIENT_ID ? "OK" : "-"}`);
+  validateEnv();
 });
+
+// --- Graceful shutdown ---
+process.on("SIGTERM", () => { console.log("SIGTERM — shutting down..."); server.close(() => process.exit(0)); });
+process.on("SIGINT", () => { console.log("\nSIGINT — shutting down..."); server.close(() => process.exit(0)); });
