@@ -7,5 +7,6 @@ engagement-config.json
 scheduled-jobs.json
 job-log.json
 posts.json
+users.json
 uploads/
 .DS_Store

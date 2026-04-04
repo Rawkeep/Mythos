@@ -22,6 +22,11 @@ import {
 import {
   schedulePost, cancelJob, scheduleRecurring, getSchedulerStatus, addLog, loadLog,
 } from "./scheduler.js";
+import {
+  registerUser, loginUser, verifyToken, authMiddleware, optionalAuth,
+  requirePlan, checkPostLimit, checkPlatformLimit, incrementPostCount,
+  upgradePlan, findUserByLemonCustomerId, findUserByEmail, PLANS,
+} from "./auth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "output");
@@ -49,6 +54,111 @@ app.use(compression());
 app.use(cors(isProduction ? { origin: process.env.APP_URL || false } : undefined));
 
 app.use(express.json({ limit: "1mb" }));
+
+// === AUTH ROUTES ===
+
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    const result = await registerUser(email, password, name);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const result = await loginUser(email, password);
+    res.json(result);
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+app.get("/api/auth/me", authMiddleware, (req, res) => {
+  const { passwordHash, ...safe } = req.user;
+  const plan = PLANS[req.user.plan || "free"];
+  res.json({ ...safe, planDetails: plan });
+});
+
+app.get("/api/plans", (_req, res) => {
+  res.json(PLANS);
+});
+
+// === LEMONSQUEEZY WEBHOOK ===
+// Set LEMON_WEBHOOK_SECRET in .env
+// In Lemonsqueezy: Webhook URL = https://your-domain.com/api/webhooks/lemonsqueezy
+
+app.post("/api/webhooks/lemonsqueezy", express.raw({ type: "application/json" }), (req, res) => {
+  const secret = process.env.LEMON_WEBHOOK_SECRET;
+
+  // Verify signature if secret is set
+  if (secret) {
+    const sig = req.headers["x-signature"];
+    if (!sig) return res.status(401).json({ error: "Missing signature" });
+
+    const hmac = crypto.createHmac("sha256", secret)
+      .update(typeof req.body === "string" ? req.body : JSON.stringify(req.body))
+      .digest("hex");
+
+    if (hmac !== sig) return res.status(401).json({ error: "Invalid signature" });
+  }
+
+  try {
+    const event = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    const eventName = event.meta?.event_name;
+    const attrs = event.data?.attributes;
+    const email = attrs?.user_email;
+    const customerId = String(attrs?.customer_id || "");
+    const subscriptionId = String(event.data?.id || "");
+    const variantName = attrs?.variant_name?.toLowerCase() || attrs?.product_name?.toLowerCase() || "";
+
+    // Map variant/product name to plan
+    let plan = "starter";
+    if (variantName.includes("pro")) plan = "pro";
+    if (variantName.includes("business")) plan = "business";
+
+    console.log(`[Lemon] ${eventName} — ${email} → ${plan}`);
+
+    if (eventName === "subscription_created" || eventName === "subscription_updated" || eventName === "subscription_resumed") {
+      const user = findUserByEmail(email) || findUserByLemonCustomerId(customerId);
+      if (user) {
+        upgradePlan(user.id, plan, {
+          customerId,
+          subscriptionId,
+          expiresAt: attrs?.renews_at || null,
+        });
+        console.log(`[Lemon] Upgraded ${email} to ${plan}`);
+      } else {
+        console.warn(`[Lemon] User not found: ${email}`);
+      }
+    }
+
+    if (eventName === "subscription_cancelled" || eventName === "subscription_expired") {
+      const user = findUserByEmail(email) || findUserByLemonCustomerId(customerId);
+      if (user) {
+        upgradePlan(user.id, "free", { customerId, subscriptionId });
+        console.log(`[Lemon] Downgraded ${email} to free`);
+      }
+    }
+
+    // order_created — for one-time payments
+    if (eventName === "order_created") {
+      const user = findUserByEmail(email) || findUserByLemonCustomerId(customerId);
+      if (user) {
+        upgradePlan(user.id, plan, { customerId });
+        console.log(`[Lemon] Order: ${email} → ${plan}`);
+      }
+    }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error("[Lemon] Webhook error:", err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // --- Security: Rate limiting (simple in-memory) ---
 const rateLimits = new Map();
@@ -184,7 +294,7 @@ app.delete("/api/media/:filename", (req, res) => {
 // === POST MANAGEMENT ===
 
 // Create a new post
-app.post("/api/posts", (req, res) => {
+app.post("/api/posts", optionalAuth, (req, res) => {
   if (!rateLimit(req.ip, 30)) return res.status(429).json({ error: "Rate limit" });
 
   const { text, media, platforms, scheduledAt, tags } = req.body;
@@ -311,8 +421,16 @@ app.delete("/api/posts/:id", (req, res) => {
 });
 
 // Publish a post immediately
-app.post("/api/posts/:id/publish", async (req, res) => {
+app.post("/api/posts/:id/publish", optionalAuth, async (req, res) => {
   if (!rateLimit(req.ip, 10)) return res.status(429).json({ error: "Rate limit" });
+
+  // Check plan limits if user is logged in
+  if (req.user) {
+    const plan = PLANS[req.user.plan || "free"];
+    if (plan.postsPerMonth !== -1 && req.user.postsThisMonth >= plan.postsPerMonth) {
+      return res.status(403).json({ error: `Post-Limit erreicht (${plan.postsPerMonth}/Monat). Upgrade deinen Plan.` });
+    }
+  }
 
   const posts = loadPosts();
   const idx = posts.findIndex(p => p.id === req.params.id);
@@ -341,6 +459,9 @@ app.post("/api/posts/:id/publish", async (req, res) => {
   post.postResults = results;
   posts[idx] = post;
   savePosts(posts);
+
+  // Increment post counter
+  if (req.user) incrementPostCount(req.user.id);
 
   // Cancel any scheduled job
   cancelJob(`post-${post.id}`);

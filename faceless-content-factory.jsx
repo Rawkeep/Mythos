@@ -156,7 +156,7 @@ function GradientOrb({ color, size, x, y, delay }) {
   );
 }
 
-export default function FacelessContentFactory() {
+export default function FacelessContentFactory({ user, onLogout }) {
   const [mainView, setMainView] = useState("factory"); // factory, myposts
   const [step, setStep] = useState(0); // 0=topic, 1=format, 2=style, 3=generating, 4=result
   const [topic, setTopic] = useState(null);
@@ -495,9 +495,20 @@ export default function FacelessContentFactory() {
               letterSpacing: "-0.5px",
             }}>Content Factory</h1>
           </div>
-          <p style={{ fontSize: 12, color: "#666", marginTop: 4, fontFamily: "'Space Mono', monospace" }}>
-            Dein AI Content-Assistent
-          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+            <p style={{ fontSize: 12, color: "#666", fontFamily: "'Space Mono', monospace", margin: 0 }}>
+              {user?.name || "Dein AI Content-Assistent"}
+            </p>
+            {user?.planDetails && (
+              <span style={{
+                padding: "2px 8px", borderRadius: 6, fontSize: 9, fontWeight: 700,
+                background: user.plan === "pro" ? "#2ECC7122" : user.plan === "business" ? "#9B59B622" : user.plan === "starter" ? "#E8A83822" : "rgba(255,255,255,0.06)",
+                color: user.plan === "pro" ? "#2ECC71" : user.plan === "business" ? "#9B59B6" : user.plan === "starter" ? "#E8A838" : "#888",
+                border: `1px solid ${user.plan === "pro" ? "#2ECC7133" : user.plan === "business" ? "#9B59B633" : user.plan === "starter" ? "#E8A83833" : "rgba(255,255,255,0.08)"}`,
+                fontFamily: "'Space Mono', monospace", textTransform: "uppercase",
+              }}>{user.planDetails.name}</span>
+            )}
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => setMainView(mainView === "myposts" ? "factory" : "myposts")} className="action-btn" style={{
@@ -524,6 +535,13 @@ export default function FacelessContentFactory() {
           }}>
             ⚡ Auto
           </button>
+          {onLogout && (
+            <button onClick={onLogout} className="action-btn" style={{
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 10, padding: "8px 12px", color: "#888", fontSize: 13,
+            }}>↪</button>
+          )}
           {history.length > 0 && (
             <button onClick={() => setShowHistory(!showHistory)} className="action-btn" style={{
               background: showHistory ? "rgba(232,168,56,0.2)" : "rgba(255,255,255,0.06)",
