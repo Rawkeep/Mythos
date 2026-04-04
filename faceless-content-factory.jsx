@@ -2,13 +2,15 @@ import { useState, useEffect, useRef } from "react";
 import MyPosts from "./my-posts.jsx";
 
 const TOPICS = [
-  { id: "export", label: "Export & Logistik", emoji: "🚢", color: "#E8A838" },
-  { id: "africa-trade", label: "Africa Trade", emoji: "🌍", color: "#2ECC71" },
-  { id: "fashion", label: "Fashion & Style", emoji: "👗", color: "#E74C8B" },
-  { id: "culture", label: "African Culture", emoji: "🎭", color: "#9B59B6" },
-  { id: "beauty", label: "Beauty & Skincare", emoji: "✨", color: "#F39C12" },
-  { id: "business", label: "Business & Hustle", emoji: "💰", color: "#1ABC9C" },
-  { id: "lifestyle", label: "Lifestyle", emoji: "🌿", color: "#3498DB" },
+  { id: "business", label: "Business & Karriere", emoji: "💼", color: "#E8A838" },
+  { id: "marketing", label: "Marketing & Sales", emoji: "📈", color: "#2ECC71" },
+  { id: "tech", label: "Tech & Digital", emoji: "💻", color: "#3498DB" },
+  { id: "fitness", label: "Fitness & Health", emoji: "🏋️", color: "#E74C3C" },
+  { id: "food", label: "Food & Rezepte", emoji: "🍳", color: "#F39C12" },
+  { id: "fashion", label: "Fashion & Beauty", emoji: "👗", color: "#E74C8B" },
+  { id: "lifestyle", label: "Lifestyle & Travel", emoji: "✈️", color: "#1ABC9C" },
+  { id: "finance", label: "Finanzen & Investing", emoji: "💰", color: "#9B59B6" },
+  { id: "education", label: "Bildung & Wissen", emoji: "📚", color: "#2980B9" },
   { id: "custom", label: "Eigenes Thema", emoji: "✏️", color: "#95A5A6" },
 ];
 
@@ -117,7 +119,7 @@ Optimize for YouTube search and CTR.`;
 Make it thought-leadership style, not salesy.`;
   }
 
-  return `You are a viral faceless content creator expert. Create ${langLabel} social media content.
+  return `You are a viral social media content expert. Create ${langLabel} social media content.
 
 TOPIC: ${topicLabel}
 FORMAT: ${formatObj?.label} — ${formatObj?.desc}
@@ -126,13 +128,13 @@ LANGUAGE: ${langLabel}
 
 ${formatInstructions}
 
-IMPORTANT RULES FOR FACELESS CONTENT:
-- No face needed — use text overlays, stock footage descriptions, B-roll ideas
-- Write text that works as on-screen text overlays
+IMPORTANT RULES:
+- Write text that works as on-screen text overlays or captions
 - Include visual direction notes in [brackets] for each section
 - Make it scroll-stopping and shareable
 - Use power words and emotional triggers
 - Every piece must provide VALUE to the viewer
+- Adapt tone and vocabulary to the topic and target audience
 
 Respond with well-structured, ready-to-use content. Use markdown formatting with clear headers.`;
 }
