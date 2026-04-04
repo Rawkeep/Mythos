@@ -19,7 +19,7 @@ const PLANS = [
     features: ["50 Posts / Monat", "2 Plattformen", "AI Content-Generierung", "Scheduling", "500 MB Uploads"],
     missing: ["Engagement Autopilot"],
     color: "#E8A838",
-    cta: "Starter waehlen",
+    cta: "Starter wählen",
     popular: false,
   },
   {
@@ -30,7 +30,7 @@ const PLANS = [
     features: ["Unlimitierte Posts", "5 Plattformen", "AI Content + Bild + Video", "Scheduling", "Engagement Autopilot", "2 GB Uploads", "API-Zugang"],
     missing: [],
     color: "#2ECC71",
-    cta: "Pro waehlen",
+    cta: "Pro wählen",
     popular: true,
   },
   {
@@ -41,7 +41,7 @@ const PLANS = [
     features: ["Alles aus Pro", "10 GB Uploads", "Priority Support", "Custom Webhooks", "Multi-Brand"],
     missing: [],
     color: "#9B59B6",
-    cta: "Business waehlen",
+    cta: "Business wählen",
   },
 ];
 
@@ -162,10 +162,10 @@ export default function LandingPage({ onLogin, onRegister }) {
       <div style={{ position: "relative", zIndex: 10, padding: "40px 20px", maxWidth: 900, margin: "0 auto" }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 16 }}>
           {[
-            { icon: "🤖", title: "AI Content", desc: "Claude, GPT-4 oder lokale Modelle generieren Texte, Bilder & Videos fuer dich" },
-            { icon: "📋", title: "Post Manager", desc: "Eigene Medien hochladen, Posts planen, Entwuerfe verwalten, Kalender-Ansicht" },
+            { icon: "🤖", title: "AI Content", desc: "Claude, GPT-4 oder lokale Modelle generieren Texte, Bilder & Videos für dich" },
+            { icon: "📋", title: "Post Manager", desc: "Eigene Medien hochladen, Posts planen, Entwürfe verwalten, Kalender-Ansicht" },
             { icon: "🚀", title: "Multi-Plattform", desc: "YouTube, X, Instagram, TikTok, LinkedIn — alles aus einem Dashboard" },
-            { icon: "⚡", title: "Automatisierung", desc: "Zeitplanung, Auto-Reply, Engagement-Bot, Webhook-API fuer n8n & Make" },
+            { icon: "⚡", title: "Automatisierung", desc: "Zeitplanung, Auto-Reply, Engagement-Bot, Webhook-API für n8n & Make" },
           ].map((f, i) => (
             <div key={i} style={{
               background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
@@ -183,7 +183,7 @@ export default function LandingPage({ onLogin, onRegister }) {
       {/* Pricing */}
       <div id="pricing" style={{ position: "relative", zIndex: 10, padding: "60px 20px", maxWidth: 1000, margin: "0 auto" }}>
         <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 32, color: "#fff", textAlign: "center", marginBottom: 8 }}>
-          Waehle deinen Plan
+          Wähle deinen Plan
         </h2>
         <p style={{ textAlign: "center", color: "#666", fontSize: 14, marginBottom: 40 }}>
           Starte kostenlos. Upgrade jederzeit.
@@ -268,7 +268,7 @@ export default function LandingPage({ onLogin, onRegister }) {
               {showAuth === "register" ? "Account erstellen" : "Anmelden"}
             </h2>
             <p style={{ fontSize: 13, color: "#666", marginBottom: 24 }}>
-              {showAuth === "register" ? "Starte kostenlos mit 5 Posts/Monat" : "Willkommen zurueck"}
+              {showAuth === "register" ? "Starte kostenlos mit 5 Posts/Monat" : "Willkommen zurück"}
             </p>
 
             {error && (

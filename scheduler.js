@@ -140,9 +140,15 @@ export function cancelJob(jobId) {
 }
 
 // --- Recurring Schedule (e.g. daily posting) ---
+const MAX_RECURRING_JOBS = 10; // max 10 active recurring jobs
 
 export function scheduleRecurring({ id, content, platforms, cronExpression, webhookUrl }) {
   const jobs = loadJobs();
+  const activeCount = jobs.active.filter(j => j.status === "active").length;
+  if (activeCount >= MAX_RECURRING_JOBS) {
+    throw new Error(`Max ${MAX_RECURRING_JOBS} aktive Recurring-Jobs erlaubt. Lösche alte Jobs zuerst.`);
+  }
+
   const job = {
     id: id || `recurring-${Date.now()}`,
     content,
@@ -165,6 +171,26 @@ export function scheduleRecurring({ id, content, platforms, cronExpression, webh
 
   addLog({ type: "recurring_created", jobId: job.id, cronExpression });
   return job;
+}
+
+// --- Stop Recurring Job ---
+
+export function stopRecurring(jobId) {
+  const task = activeTasks.get(jobId);
+  if (task) {
+    task.stop();
+    activeTasks.delete(jobId);
+  }
+
+  const jobs = loadJobs();
+  const idx = jobs.active.findIndex(j => j.id === jobId);
+  if (idx !== -1) {
+    jobs.active[idx].status = "stopped";
+    saveJobs(jobs);
+  }
+
+  addLog({ type: "recurring_stopped", jobId });
+  return true;
 }
 
 // --- Get Status ---

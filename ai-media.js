@@ -199,9 +199,12 @@ export async function generateVideoReplicate(prompt, imageUrl) {
 
   const prediction = await resp.json();
 
-  // Poll for completion
+  // Poll for completion (max 60 attempts = ~3 min)
   let result = prediction;
+  let attempts = 0;
+  const MAX_POLL_ATTEMPTS = 60;
   while (result.status !== "succeeded" && result.status !== "failed") {
+    if (++attempts > MAX_POLL_ATTEMPTS) throw new Error("Replicate: Timeout — zu viele Polling-Versuche (max 3 Min)");
     await new Promise(r => setTimeout(r, 3000));
     const poll = await fetch(`https://api.replicate.com/v1/predictions/${result.id}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -380,7 +383,10 @@ export async function generateVideoRunway(prompt, imageUrl) {
   if (!resp.ok) throw new Error(`Runway: ${(await resp.json()).detail || resp.status}`);
 
   let result = await resp.json();
+  let attempts = 0;
+  const MAX_POLL_ATTEMPTS = 60; // max 60 * 5s = 5 min
   while (result.status !== "succeeded" && result.status !== "failed") {
+    if (++attempts > MAX_POLL_ATTEMPTS) throw new Error("Runway: Timeout — zu viele Polling-Versuche (max 5 Min)");
     await new Promise(r => setTimeout(r, 5000));
     result = await (await fetch(`https://api.replicate.com/v1/predictions/${result.id}`, {
       headers: { Authorization: `Bearer ${token}` },

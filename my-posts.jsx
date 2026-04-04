@@ -252,7 +252,7 @@ export default function MyPosts({ platformStatus }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
         {[
           { label: "Gesamt", value: stats.total, color: "#fff" },
-          { label: "Entwuerfe", value: stats.drafts, color: "#888" },
+          { label: "Entwürfe", value: stats.drafts, color: "#888" },
           { label: "Geplant", value: stats.scheduled, color: "#E8A838" },
           { label: "Gepostet", value: stats.posted, color: "#2ECC71" },
         ].map(s => (
@@ -384,10 +384,10 @@ export default function MyPosts({ platformStatus }) {
                     padding: "5px 10px", borderRadius: 8, fontSize: 10, fontWeight: 600,
                     background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", color: "#888",
                   }}>Duplizieren</button>
-                  <button onClick={() => { if (confirm("Post loeschen?")) deletePost(post.id); }} className="action-btn" style={{
+                  <button onClick={() => { if (confirm("Post löschen?")) deletePost(post.id); }} className="action-btn" style={{
                     padding: "5px 10px", borderRadius: 8, fontSize: 10, fontWeight: 600,
                     background: "#E74C3C12", border: "1px solid #E74C3C22", color: "#E74C3C",
-                  }}>Loeschen</button>
+                  }}>Löschen</button>
                 </div>
               </div>
             );
@@ -699,12 +699,12 @@ export default function MyPosts({ platformStatus }) {
                       <span>{formatBytes(f.size)}</span>
                       <span>{formatDate(f.uploadedAt)}</span>
                     </div>
-                    <button onClick={() => { if (confirm("Datei loeschen?")) deleteMedia(f.filename); }}
+                    <button onClick={() => { if (confirm("Datei löschen?")) deleteMedia(f.filename); }}
                       className="action-btn" style={{
                         marginTop: 6, width: "100%", padding: "4px", borderRadius: 6,
                         background: "#E74C3C12", border: "1px solid #E74C3C22",
                         color: "#E74C3C", fontSize: 9, fontWeight: 600, cursor: "pointer",
-                      }}>Loeschen</button>
+                      }}>Löschen</button>
                   </div>
                 </div>
               ))}

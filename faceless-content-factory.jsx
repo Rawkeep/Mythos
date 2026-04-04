@@ -15,12 +15,12 @@ const TOPICS = [
 ];
 
 const FORMATS = [
-  { id: "reel-script", label: "Kurzvideo-Script", icon: "🎬", desc: "Fuer Reels, TikTok & Shorts" },
+  { id: "reel-script", label: "Kurzvideo-Script", icon: "🎬", desc: "Für Reels, TikTok & Shorts" },
   { id: "carousel", label: "Karussell-Post", icon: "📑", desc: "5-7 Slides zum Durchswipen" },
   { id: "quote-card", label: "Zitat-Karte", icon: "💡", desc: "Teilbare Wissens-Karte" },
   { id: "story-series", label: "Story-Serie", icon: "📱", desc: "5 Stories mit Interaktion" },
-  { id: "thread", label: "Langer Text-Post", icon: "🧵", desc: "Ausfuehrlicher Beitrag" },
-  { id: "batch-week", label: "Wochenplan (7 Posts)", icon: "📅", desc: "Kompletter Content fuer 1 Woche" },
+  { id: "thread", label: "Langer Text-Post", icon: "🧵", desc: "Ausführlicher Beitrag" },
+  { id: "batch-week", label: "Wochenplan (7 Posts)", icon: "📅", desc: "Kompletter Content für 1 Woche" },
   { id: "yt-short", label: "YouTube Short", icon: "▶️", desc: "60-Sekunden Video-Script" },
   { id: "yt-description", label: "YouTube Video-Info", icon: "📝", desc: "Titel, Beschreibung & Tags" },
   { id: "linkedin-post", label: "LinkedIn Beitrag", icon: "💼", desc: "Professioneller Experten-Post" },
@@ -906,9 +906,9 @@ export default function FacelessContentFactory({ user, onLogout }) {
         {mainView === "factory" && step === 0 && !showHistory && (
           <div style={{ animation: "fadeUp 0.4s ease" }}>
             <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 24, color: "#fff", marginBottom: 4 }}>
-              Worueber soll dein Post sein?
+              Worüber soll dein Post sein?
             </h2>
-            <p style={{ fontSize: 13, color: "#666", marginBottom: 20 }}>Waehle ein Thema — tippe einfach drauf</p>
+            <p style={{ fontSize: 13, color: "#666", marginBottom: 20 }}>Wähle ein Thema — tippe einfach drauf</p>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               {TOPICS.map((t, i) => (

@@ -73,7 +73,7 @@ export async function registerUser(email, password, name) {
 
   if (!email || !password) throw new Error("E-Mail und Passwort erforderlich");
   if (password.length < 8) throw new Error("Passwort muss mindestens 8 Zeichen haben");
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Ungueltige E-Mail-Adresse");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Ungültige E-Mail-Adresse");
 
   if (findUser(email)) throw new Error("E-Mail bereits registriert");
 
@@ -142,7 +142,7 @@ export function authMiddleware(req, res, next) {
   }
 
   const user = verifyToken(header.slice(7));
-  if (!user) return res.status(401).json({ error: "Token ungueltig oder abgelaufen" });
+  if (!user) return res.status(401).json({ error: "Token ungültig oder abgelaufen" });
 
   req.user = user;
   next();
@@ -169,7 +169,7 @@ export function requirePlan(minPlan) {
     if (userPlanIndex < minIndex) {
       const plan = PLANS[minPlan];
       return res.status(403).json({
-        error: `${plan.name}-Plan oder hoeher erforderlich`,
+        error: `${plan.name}-Plan oder höher erforderlich`,
         requiredPlan: minPlan,
         currentPlan: req.user.plan,
       });
@@ -212,7 +212,7 @@ export function checkPlatformLimit(req, res, next) {
 
   if (platforms.length > plan.platforms) {
     return res.status(403).json({
-      error: `Max. ${plan.platforms} Plattform(en) mit deinem Plan. Upgrade fuer mehr.`,
+      error: `Max. ${plan.platforms} Plattform(en) mit deinem Plan. Upgrade für mehr.`,
       limit: plan.platforms,
       requested: platforms.length,
       currentPlan: req.user.plan,

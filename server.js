@@ -20,7 +20,7 @@ import {
   generateImage, generateAIVideo, generateFullMedia, buildImagePrompt,
 } from "./ai-media.js";
 import {
-  schedulePost, cancelJob, scheduleRecurring, getSchedulerStatus, addLog, loadLog,
+  schedulePost, cancelJob, scheduleRecurring, stopRecurring, getSchedulerStatus, addLog, loadLog,
 } from "./scheduler.js";
 import {
   registerUser, loginUser, verifyToken, authMiddleware, optionalAuth,
@@ -160,7 +160,7 @@ app.post("/api/webhooks/lemonsqueezy", express.raw({ type: "application/json" })
   }
 });
 
-// --- Security: Rate limiting (simple in-memory) ---
+// --- Security: Rate limiting (in-memory, per-key) ---
 const rateLimits = new Map();
 function rateLimit(key, maxPerMinute = 30) {
   const now = Date.now();
@@ -171,6 +171,41 @@ function rateLimit(key, maxPerMinute = 30) {
   recent.push(now);
   rateLimits.set(key, recent);
   return true;
+}
+
+// --- Security: Daily AI call budget (per-IP, resets at midnight) ---
+const aiBudgets = new Map();
+const AI_DAILY_LIMIT = parseInt(process.env.AI_DAILY_LIMIT, 10) || 100; // default 100 AI calls/day
+
+function checkAIBudget(ip) {
+  const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const key = `${ip}:${today}`;
+  const used = aiBudgets.get(key) || 0;
+  if (used >= AI_DAILY_LIMIT) return false;
+  aiBudgets.set(key, used + 1);
+  // Cleanup old entries once a day
+  for (const [k] of aiBudgets) {
+    if (!k.endsWith(today)) aiBudgets.delete(k);
+  }
+  return true;
+}
+
+function getAIBudgetRemaining(ip) {
+  const today = new Date().toISOString().slice(0, 10);
+  const used = aiBudgets.get(`${ip}:${today}`) || 0;
+  return { used, limit: AI_DAILY_LIMIT, remaining: AI_DAILY_LIMIT - used };
+}
+
+// --- Security: Webhook authentication ---
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || null;
+
+function webhookAuth(req, res, next) {
+  if (!WEBHOOK_SECRET) return next(); // no secret = no protection (dev mode)
+  const provided = req.headers["x-webhook-secret"] || req.query.secret;
+  if (provided !== WEBHOOK_SECRET) {
+    return res.status(401).json({ error: "Ungültiger Webhook-Secret. Setze x-webhook-secret Header." });
+  }
+  next();
 }
 
 // --- Secure File Upload ---
@@ -375,7 +410,7 @@ app.put("/api/posts/:id", (req, res) => {
   if (idx === -1) return res.status(404).json({ error: "Post nicht gefunden" });
 
   const post = posts[idx];
-  if (post.status === "posted") return res.status(400).json({ error: "Bereits gepostete Posts koennen nicht bearbeitet werden" });
+  if (post.status === "posted") return res.status(400).json({ error: "Bereits gepostete Posts können nicht bearbeitet werden" });
 
   const { text, media, platforms, scheduledAt, tags, status } = req.body;
 
@@ -531,6 +566,9 @@ app.get("/api/models", (_req, res) => {
 
 // Generate content
 app.post("/api/generate", async (req, res) => {
+  if (!rateLimit(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute. Bitte warte kurz." });
+  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT} AI-Calls/Tag).`, ...getAIBudgetRemaining(req.ip) });
+
   const { modelId, prompt } = req.body;
   const config = MODELS[modelId];
 
@@ -685,6 +723,9 @@ app.post("/api/engagement/rules", (req, res) => {
 
 // Generate a natural engagement reply using AI
 app.post("/api/engagement/generate-reply", async (req, res) => {
+  if (!rateLimit(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 Reply-Calls/Minute." });
+  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+
   const { platform, postContent, commentToReply, modelId } = req.body;
   const config = loadEngagementConfig();
   const prompt = buildEngagementPrompt(
@@ -888,6 +929,9 @@ app.get("/api/media/providers", (_req, res) => {
 
 // Generate AI image
 app.post("/api/media/image", async (req, res) => {
+  if (!rateLimit(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute." });
+  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+
   const { topic, style, customPrompt, aspectRatio } = req.body;
   try {
     const prompt = customPrompt || buildImagePrompt(topic, style || "cinematic");
@@ -900,6 +944,9 @@ app.post("/api/media/image", async (req, res) => {
 
 // Generate AI video
 app.post("/api/media/video", async (req, res) => {
+  if (!rateLimit(`ai:${req.ip}`, 5)) return res.status(429).json({ error: "Max 5 Video-Calls/Minute." });
+  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+
   const { prompt, imageUrl } = req.body;
   try {
     const result = await generateAIVideo(prompt, imageUrl);
@@ -911,6 +958,9 @@ app.post("/api/media/video", async (req, res) => {
 
 // Full pipeline: Content → Image → Video
 app.post("/api/media/full-pipeline", async (req, res) => {
+  if (!rateLimit(`ai:${req.ip}`, 3)) return res.status(429).json({ error: "Max 3 Pipeline-Calls/Minute." });
+  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+
   const { content, topic, format, aspectRatio } = req.body;
   try {
     const result = await generateFullMedia(content, topic, format, aspectRatio);
@@ -1017,7 +1067,8 @@ app.get("/api/video/list", (_req, res) => {
 
 // n8n Webhook: Content generieren lassen
 // In n8n: HTTP Request Node → POST ${BACKEND_URL}/api/webhook/generate
-app.post("/api/webhook/generate", async (req, res) => {
+// Auth: Set WEBHOOK_SECRET in .env, send as x-webhook-secret header
+app.post("/api/webhook/generate", webhookAuth, async (req, res) => {
   const { topic, format, style, lang, modelId, callbackUrl } = req.body;
 
   addLog({ type: "webhook_received", action: "generate", topic, format });
@@ -1054,7 +1105,7 @@ app.post("/api/webhook/generate", async (req, res) => {
 
 // n8n Webhook: Direkt auf Plattform posten
 // In n8n: HTTP Request Node → POST ${BACKEND_URL}/api/webhook/post
-app.post("/api/webhook/post", async (req, res) => {
+app.post("/api/webhook/post", webhookAuth, async (req, res) => {
   const { text, platforms, callbackUrl } = req.body;
 
   addLog({ type: "webhook_received", action: "post", platforms });
@@ -1080,7 +1131,7 @@ app.post("/api/webhook/post", async (req, res) => {
 });
 
 // n8n Webhook: Bild generieren
-app.post("/api/webhook/image", async (req, res) => {
+app.post("/api/webhook/image", webhookAuth, async (req, res) => {
   const { topic, style, prompt, aspectRatio, callbackUrl } = req.body;
 
   addLog({ type: "webhook_received", action: "image", topic });
@@ -1104,7 +1155,7 @@ app.post("/api/webhook/image", async (req, res) => {
 });
 
 // n8n Webhook: Komplette Pipeline (Content → Bild → Video → Posten)
-app.post("/api/webhook/full-pipeline", async (req, res) => {
+app.post("/api/webhook/full-pipeline", webhookAuth, async (req, res) => {
   const { topic, format, style, platforms, callbackUrl } = req.body;
 
   addLog({ type: "webhook_received", action: "full-pipeline", topic });
@@ -1157,7 +1208,7 @@ app.post("/api/webhook/full-pipeline", async (req, res) => {
 });
 
 // n8n Webhook: Eingehender Kommentar → AI-Antwort generieren
-app.post("/api/webhook/incoming-comment", async (req, res) => {
+app.post("/api/webhook/incoming-comment", webhookAuth, async (req, res) => {
   const { platform, postId, commentText, commentAuthor, callbackUrl } = req.body;
 
   addLog({ type: "webhook_received", action: "incoming-comment", platform, commentAuthor });
@@ -1205,9 +1256,19 @@ app.post("/api/schedule/post", (req, res) => {
 
 // Wiederholende Posts (z.B. taeglich)
 app.post("/api/schedule/recurring", (req, res) => {
-  const { content, platforms, cronExpression, webhookUrl } = req.body;
-  const job = scheduleRecurring({ content, platforms, cronExpression, webhookUrl });
-  res.json({ success: true, job });
+  try {
+    const { content, platforms, cronExpression, webhookUrl } = req.body;
+    const job = scheduleRecurring({ content, platforms, cronExpression, webhookUrl });
+    res.json({ success: true, job });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Recurring Job stoppen
+app.post("/api/schedule/stop-recurring/:jobId", (req, res) => {
+  stopRecurring(req.params.jobId);
+  res.json({ success: true });
 });
 
 // Job abbrechen
@@ -1228,6 +1289,11 @@ app.get("/api/log", (_req, res) => {
   } catch {
     res.json([]);
   }
+});
+
+// === AI BUDGET STATUS ===
+app.get("/api/ai/budget", (req, res) => {
+  res.json(getAIBudgetRemaining(req.ip));
 });
 
 // === HEALTH CHECK ===
