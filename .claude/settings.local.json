@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(npx vite:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(curl -s http://localhost:3001/api/health)",
+      "Bash(gh auth:*)",
+      "Bash(git init:*)",
+      "Bash(git -C /Users/z_rkb/Downloads/Mythos status)",
+      "Bash(git add:*)"
+    ]
+  }
+}
