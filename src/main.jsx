@@ -3,12 +3,22 @@ import { createRoot } from "react-dom/client";
 import FacelessContentFactory from "../faceless-content-factory.jsx";
 import LandingPage from "../landing-page.jsx";
 
+// Auto-detect GitHub Pages demo mode
+const IS_DEMO = window.location.hostname.includes("github.io");
+const DEMO_USER = { name: "Demo User", email: "demo@mythos.app", plan: "pro" };
+
 function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
   // Check for existing token on mount
   useEffect(() => {
+    // GitHub Pages = demo mode, skip auth
+    if (IS_DEMO) {
+      setUser(DEMO_USER);
+      setLoading(false);
+      return;
+    }
     const token = localStorage.getItem("mythos_token");
     if (token) {
       fetch("/api/auth/me", {
