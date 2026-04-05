@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  mythos:
+    build: .
+    container_name: mythos
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3001}:3001"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - DATA_DIR=/app/data
+    volumes:
+      # Persist SQLite database
+      - mythos-data:/app/data
+      # Persist uploaded files
+      - mythos-uploads:/app/uploads
+      # Persist generated output (AI media, rendered videos)
+      - mythos-output:/app/output
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  mythos-data:
+  mythos-uploads:
+  mythos-output:

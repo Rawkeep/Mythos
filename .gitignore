@@ -10,3 +10,13 @@ posts.json
 users.json
 uploads/
 .DS_Store
+
+# SQLite database
+*.db
+*.db-wal
+*.db-shm
+.db-migrated
+data/
+
+# Error logs
+errors.log

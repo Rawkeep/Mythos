@@ -1,31 +1,9 @@
-// Real Scheduler + Job Queue + n8n Webhook Integration
+// Real Scheduler + Job Queue + n8n Webhook Integration (SQLite-backed)
 import cron from "node-cron";
-import { readFileSync, writeFileSync, existsSync } from "fs";
-
-const JOBS_PATH = "./scheduled-jobs.json";
-const LOG_PATH = "./job-log.json";
-
-// --- Job Storage ---
-
-function loadJobs() {
-  if (existsSync(JOBS_PATH)) return JSON.parse(readFileSync(JOBS_PATH, "utf-8"));
-  return { scheduled: [], active: [] };
-}
-
-function saveJobs(jobs) {
-  writeFileSync(JOBS_PATH, JSON.stringify(jobs, null, 2));
-}
-
-function loadLog() {
-  if (existsSync(LOG_PATH)) return JSON.parse(readFileSync(LOG_PATH, "utf-8"));
-  return [];
-}
-
-function addLog(entry) {
-  const log = loadLog();
-  log.unshift({ ...entry, timestamp: new Date().toISOString() });
-  writeFileSync(LOG_PATH, JSON.stringify(log.slice(0, 200), null, 2));
-}
+import {
+  dbGetSchedulerJobs, dbInsertJob, dbUpdateJob,
+  dbAddLog, dbGetLog,
+} from "./db.js";
 
 // --- Active Cron Tasks ---
 const activeTasks = new Map();
@@ -33,9 +11,9 @@ const activeTasks = new Map();
 // --- Schedule a Post ---
 
 export function schedulePost({ id, content, platforms, scheduledAt, webhookUrl }) {
-  const jobs = loadJobs();
   const job = {
     id: id || `job-${Date.now()}`,
+    type: "scheduled",
     content,
     platforms: platforms || [],
     scheduledAt,
@@ -44,8 +22,7 @@ export function schedulePost({ id, content, platforms, scheduledAt, webhookUrl }
     createdAt: new Date().toISOString(),
   };
 
-  jobs.scheduled.push(job);
-  saveJobs(jobs);
+  dbInsertJob(job);
 
   // Create actual cron task
   const date = new Date(scheduledAt);
@@ -66,12 +43,7 @@ export function schedulePost({ id, content, platforms, scheduledAt, webhookUrl }
 // --- Execute a Job ---
 
 async function executeJob(job) {
-  const jobs = loadJobs();
-  const idx = jobs.scheduled.findIndex(j => j.id === job.id);
-  if (idx !== -1) {
-    jobs.scheduled[idx].status = "running";
-    saveJobs(jobs);
-  }
+  dbUpdateJob(job.id, { status: "running" });
 
   const results = {};
 
@@ -90,12 +62,11 @@ async function executeJob(job) {
   }
 
   // Update job status
-  if (idx !== -1) {
-    jobs.scheduled[idx].status = "completed";
-    jobs.scheduled[idx].results = results;
-    jobs.scheduled[idx].completedAt = new Date().toISOString();
-    saveJobs(jobs);
-  }
+  dbUpdateJob(job.id, {
+    status: "completed",
+    results,
+    completedAt: new Date().toISOString(),
+  });
 
   // Notify n8n webhook if configured
   if (job.webhookUrl) {
@@ -128,13 +99,7 @@ export function cancelJob(jobId) {
     activeTasks.delete(jobId);
   }
 
-  const jobs = loadJobs();
-  const idx = jobs.scheduled.findIndex(j => j.id === jobId);
-  if (idx !== -1) {
-    jobs.scheduled[idx].status = "cancelled";
-    saveJobs(jobs);
-  }
-
+  dbUpdateJob(jobId, { status: "cancelled" });
   addLog({ type: "cancelled", jobId });
   return true;
 }
@@ -143,25 +108,24 @@ export function cancelJob(jobId) {
 const MAX_RECURRING_JOBS = 10; // max 10 active recurring jobs
 
 export function scheduleRecurring({ id, content, platforms, cronExpression, webhookUrl }) {
-  const jobs = loadJobs();
+  const jobs = dbGetSchedulerJobs();
   const activeCount = jobs.active.filter(j => j.status === "active").length;
   if (activeCount >= MAX_RECURRING_JOBS) {
-    throw new Error(`Max ${MAX_RECURRING_JOBS} aktive Recurring-Jobs erlaubt. Lösche alte Jobs zuerst.`);
+    throw new Error(`Max ${MAX_RECURRING_JOBS} aktive Recurring-Jobs erlaubt. Loesche alte Jobs zuerst.`);
   }
 
   const job = {
     id: id || `recurring-${Date.now()}`,
+    type: "recurring",
     content,
     platforms,
     cronExpression,
     webhookUrl,
-    type: "recurring",
     status: "active",
     createdAt: new Date().toISOString(),
   };
 
-  jobs.active.push(job);
-  saveJobs(jobs);
+  dbInsertJob(job);
 
   const task = cron.schedule(cronExpression, async () => {
     await executeJob(job);
@@ -182,13 +146,7 @@ export function stopRecurring(jobId) {
     activeTasks.delete(jobId);
   }
 
-  const jobs = loadJobs();
-  const idx = jobs.active.findIndex(j => j.id === jobId);
-  if (idx !== -1) {
-    jobs.active[idx].status = "stopped";
-    saveJobs(jobs);
-  }
-
+  dbUpdateJob(jobId, { status: "stopped" });
   addLog({ type: "recurring_stopped", jobId });
   return true;
 }
@@ -196,7 +154,7 @@ export function stopRecurring(jobId) {
 // --- Get Status ---
 
 export function getSchedulerStatus() {
-  const jobs = loadJobs();
+  const jobs = dbGetSchedulerJobs();
   const log = loadLog();
   return {
     scheduled: jobs.scheduled.filter(j => j.status === "scheduled").length,
@@ -208,4 +166,17 @@ export function getSchedulerStatus() {
   };
 }
 
-export { loadJobs, loadLog, addLog };
+// --- Log wrappers ---
+
+export function addLog(entry) {
+  dbAddLog(entry);
+}
+
+export function loadLog() {
+  return dbGetLog(200);
+}
+
+// Keep named exports compatible with server.js imports
+export function loadJobs() {
+  return dbGetSchedulerJobs();
+}

@@ -1,11 +1,29 @@
-// Authentication + Plan Management
+// Authentication + Plan Management (SQLite-backed)
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import {
+  dbFindUserByEmail, dbFindUserById, dbFindUserByLemonCustomerId,
+  dbInsertUser, dbUpdateUser,
+} from "./db.js";
 
-const USERS_DB = "./users.json";
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString("hex");
+// --- JWT Secret ---
+const isProduction = process.env.NODE_ENV === "production";
+
+function getJwtSecret() {
+  if (process.env.JWT_SECRET) {
+    return process.env.JWT_SECRET;
+  }
+  if (isProduction) {
+    console.error("[FATAL] JWT_SECRET environment variable is required in production mode.");
+    console.error("  Generate one with: node -e \"console.log(require('crypto').randomBytes(64).toString('hex'))\"");
+    process.exit(1);
+  }
+  console.warn("[WARN] JWT_SECRET not set — using fixed development secret. Do NOT use in production!");
+  return "mythos-dev-secret-do-not-use-in-production";
+}
+
+const JWT_SECRET = getJwtSecret();
 const JWT_EXPIRES = "30d";
 
 // --- Plans ---
@@ -52,20 +70,6 @@ export const PLANS = {
   },
 };
 
-// --- User Storage ---
-function loadUsers() {
-  if (existsSync(USERS_DB)) return JSON.parse(readFileSync(USERS_DB, "utf-8"));
-  return [];
-}
-
-function saveUsers(users) {
-  writeFileSync(USERS_DB, JSON.stringify(users, null, 2));
-}
-
-function findUser(email) {
-  return loadUsers().find(u => u.email === email.toLowerCase().trim());
-}
-
 // --- Auth Functions ---
 
 export async function registerUser(email, password, name) {
@@ -73,9 +77,9 @@ export async function registerUser(email, password, name) {
 
   if (!email || !password) throw new Error("E-Mail und Passwort erforderlich");
   if (password.length < 8) throw new Error("Passwort muss mindestens 8 Zeichen haben");
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Ungültige E-Mail-Adresse");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Ungueltige E-Mail-Adresse");
 
-  if (findUser(email)) throw new Error("E-Mail bereits registriert");
+  if (dbFindUserByEmail(email)) throw new Error("E-Mail bereits registriert");
 
   const hash = await bcrypt.hash(password, 12);
   const user = {
@@ -92,16 +96,13 @@ export async function registerUser(email, password, name) {
     createdAt: new Date().toISOString(),
   };
 
-  const users = loadUsers();
-  users.push(user);
-  saveUsers(users);
-
+  dbInsertUser(user);
   return { user: sanitizeUser(user), token: generateToken(user) };
 }
 
 export async function loginUser(email, password) {
   email = email.toLowerCase().trim();
-  const user = findUser(email);
+  const user = dbFindUserByEmail(email);
   if (!user) throw new Error("E-Mail oder Passwort falsch");
 
   const valid = await bcrypt.compare(password, user.passwordHash);
@@ -116,7 +117,7 @@ export async function loginUser(email, password) {
 export function verifyToken(token) {
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    const user = findUser(payload.email);
+    const user = dbFindUserByEmail(payload.email);
     if (!user) return null;
     resetMonthlyCounterIfNeeded(user);
     return user;
@@ -142,13 +143,13 @@ export function authMiddleware(req, res, next) {
   }
 
   const user = verifyToken(header.slice(7));
-  if (!user) return res.status(401).json({ error: "Token ungültig oder abgelaufen" });
+  if (!user) return res.status(401).json({ error: "Token ungueltig oder abgelaufen" });
 
   req.user = user;
   next();
 }
 
-// Optional auth — sets req.user if token present, but doesn't block
+// Optional auth -- sets req.user if token present, but doesn't block
 export function optionalAuth(req, _res, next) {
   const header = req.headers.authorization;
   if (header && header.startsWith("Bearer ")) {
@@ -169,7 +170,7 @@ export function requirePlan(minPlan) {
     if (userPlanIndex < minIndex) {
       const plan = PLANS[minPlan];
       return res.status(403).json({
-        error: `${plan.name}-Plan oder höher erforderlich`,
+        error: `${plan.name}-Plan oder hoeher erforderlich`,
         requiredPlan: minPlan,
         currentPlan: req.user.plan,
       });
@@ -196,11 +197,9 @@ export function checkPostLimit(req, res, next) {
 }
 
 export function incrementPostCount(userId) {
-  const users = loadUsers();
-  const idx = users.findIndex(u => u.id === userId);
-  if (idx !== -1) {
-    users[idx].postsThisMonth = (users[idx].postsThisMonth || 0) + 1;
-    saveUsers(users);
+  const user = dbFindUserById(userId);
+  if (user) {
+    dbUpdateUser(userId, { postsThisMonth: (user.postsThisMonth || 0) + 1 });
   }
 }
 
@@ -212,7 +211,7 @@ export function checkPlatformLimit(req, res, next) {
 
   if (platforms.length > plan.platforms) {
     return res.status(403).json({
-      error: `Max. ${plan.platforms} Plattform(en) mit deinem Plan. Upgrade für mehr.`,
+      error: `Max. ${plan.platforms} Plattform(en) mit deinem Plan. Upgrade fuer mehr.`,
       limit: plan.platforms,
       requested: platforms.length,
       currentPlan: req.user.plan,
@@ -224,25 +223,24 @@ export function checkPlatformLimit(req, res, next) {
 // --- Plan Upgrades (Lemonsqueezy) ---
 
 export function upgradePlan(userId, plan, lemonData = {}) {
-  const users = loadUsers();
-  const idx = users.findIndex(u => u.id === userId);
-  if (idx === -1) return null;
+  const user = dbFindUserById(userId);
+  if (!user) return null;
 
-  users[idx].plan = plan;
-  if (lemonData.customerId) users[idx].lemonCustomerId = lemonData.customerId;
-  if (lemonData.subscriptionId) users[idx].lemonSubscriptionId = lemonData.subscriptionId;
-  if (lemonData.expiresAt) users[idx].planExpiresAt = lemonData.expiresAt;
+  const updates = { plan };
+  if (lemonData.customerId) updates.lemonCustomerId = lemonData.customerId;
+  if (lemonData.subscriptionId) updates.lemonSubscriptionId = lemonData.subscriptionId;
+  if (lemonData.expiresAt) updates.planExpiresAt = lemonData.expiresAt;
 
-  saveUsers(users);
-  return sanitizeUser(users[idx]);
+  dbUpdateUser(userId, updates);
+  return sanitizeUser({ ...user, ...updates });
 }
 
 export function findUserByLemonCustomerId(customerId) {
-  return loadUsers().find(u => u.lemonCustomerId === customerId);
+  return dbFindUserByLemonCustomerId(customerId);
 }
 
 export function findUserByEmail(email) {
-  return findUser(email);
+  return dbFindUserByEmail(email);
 }
 
 // --- Helpers ---
@@ -263,14 +261,9 @@ function getNextMonthReset() {
 
 function resetMonthlyCounterIfNeeded(user) {
   if (!user.postsResetAt || new Date() >= new Date(user.postsResetAt)) {
-    const users = loadUsers();
-    const idx = users.findIndex(u => u.id === user.id);
-    if (idx !== -1) {
-      users[idx].postsThisMonth = 0;
-      users[idx].postsResetAt = getNextMonthReset();
-      saveUsers(users);
-      user.postsThisMonth = 0;
-      user.postsResetAt = users[idx].postsResetAt;
-    }
+    const newReset = getNextMonthReset();
+    dbUpdateUser(user.id, { postsThisMonth: 0, postsResetAt: newReset });
+    user.postsThisMonth = 0;
+    user.postsResetAt = newReset;
   }
 }

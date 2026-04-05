@@ -3,10 +3,12 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
+import rateLimit from "express-rate-limit";
 import path from "path";
 import crypto from "crypto";
+import fs from "fs";
 import { fileURLToPath } from "url";
-import { existsSync as fsExists, mkdirSync, readdirSync, statSync, unlinkSync, readFileSync, writeFileSync } from "fs";
+import { existsSync as fsExists, mkdirSync, readdirSync, statSync, unlinkSync, readFileSync, writeFileSync, appendFileSync } from "fs";
 import multer from "multer";
 import {
   getAuthUrl, exchangeCode, getToken, removeToken, loadTokens,
@@ -27,11 +29,16 @@ import {
   requirePlan, checkPostLimit, checkPlatformLimit, incrementPostCount,
   upgradePlan, findUserByLemonCustomerId, findUserByEmail, PLANS,
 } from "./auth.js";
+import {
+  getDb, dbHealthCheck, closeDb,
+  dbGetAllPosts, dbGetPostById, dbGetPostsByStatus,
+  dbInsertPost, dbUpdatePost, dbDeletePost,
+} from "./db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "output");
 const UPLOADS_DIR = path.join(__dirname, "uploads");
-const POSTS_DB = path.join(__dirname, "posts.json");
+const ERRORS_LOG = path.join(__dirname, "errors.log");
 if (!fsExists(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
 if (!fsExists(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
 
@@ -39,12 +46,31 @@ const isProduction = process.env.NODE_ENV === "production";
 const PORT = process.env.PORT || 3001;
 const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
 
+// Initialize database on startup
+getDb();
+
 const app = express();
+
+// === HTTPS ENFORCEMENT (production) ===
+if (isProduction) {
+  app.use((req, res, next) => {
+    // Trust proxy headers (Railway, Render, Docker behind reverse proxy)
+    if (req.headers["x-forwarded-proto"] && req.headers["x-forwarded-proto"] !== "https") {
+      return res.redirect(301, `https://${req.headers.host}${req.url}`);
+    }
+    next();
+  });
+}
 
 // Security headers
 app.use(helmet({
   contentSecurityPolicy: false, // CSP handled by frontend framework
   crossOriginEmbedderPolicy: false, // allow loading external images/videos
+  hsts: isProduction ? {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true,
+  } : false,
 }));
 
 // Gzip compression
@@ -55,21 +81,89 @@ app.use(cors(isProduction ? { origin: process.env.APP_URL || false } : undefined
 
 app.use(express.json({ limit: "1mb" }));
 
+// Trust proxy for rate limiting behind reverse proxy
+app.set("trust proxy", 1);
+
+// === RATE LIMITING ===
+
+// Auth routes: strict (5 attempts per 15 minutes)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Zu viele Anmeldeversuche. Bitte warte 15 Minuten." },
+  keyGenerator: (req) => req.ip,
+});
+
+// AI generation routes: moderate (20 per minute)
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Zu viele AI-Anfragen. Bitte warte kurz." },
+  keyGenerator: (req) => req.ip,
+});
+
+// General API: loose (100 per minute)
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Zu viele Anfragen. Bitte warte kurz." },
+  keyGenerator: (req) => req.ip,
+});
+
+// Apply general rate limit to all API routes
+app.use("/api/", generalLimiter);
+
+// === INPUT VALIDATION HELPERS ===
+
+function validateString(value, fieldName, { minLength = 0, maxLength = 10000, required = false } = {}) {
+  if (value === undefined || value === null) {
+    if (required) throw new Error(`${fieldName} ist erforderlich`);
+    return value;
+  }
+  if (typeof value !== "string") throw new Error(`${fieldName} muss ein String sein`);
+  if (value.length < minLength) throw new Error(`${fieldName} muss mindestens ${minLength} Zeichen haben`);
+  if (value.length > maxLength) throw new Error(`${fieldName} darf maximal ${maxLength} Zeichen haben`);
+  return value;
+}
+
+function validateArray(value, fieldName, { maxItems = 100 } = {}) {
+  if (value === undefined || value === null) return value;
+  if (!Array.isArray(value)) throw new Error(`${fieldName} muss ein Array sein`);
+  if (value.length > maxItems) throw new Error(`${fieldName} darf maximal ${maxItems} Eintraege haben`);
+  return value;
+}
+
+function sanitizeHtml(str) {
+  if (typeof str !== "string") return str;
+  return str.replace(/[<>]/g, "");
+}
+
 // === AUTH ROUTES ===
 
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", authLimiter, async (req, res) => {
   try {
     const { email, password, name } = req.body;
-    const result = await registerUser(email, password, name);
+    validateString(email, "email", { required: true, maxLength: 255 });
+    validateString(password, "password", { required: true, minLength: 8, maxLength: 128 });
+    validateString(name, "name", { maxLength: 100 });
+    const result = await registerUser(email, password, name ? sanitizeHtml(name) : name);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
+    validateString(email, "email", { required: true, maxLength: 255 });
+    validateString(password, "password", { required: true, maxLength: 128 });
     const result = await loginUser(email, password);
     res.json(result);
   } catch (err) {
@@ -120,7 +214,7 @@ app.post("/api/webhooks/lemonsqueezy", express.raw({ type: "application/json" })
     if (variantName.includes("pro")) plan = "pro";
     if (variantName.includes("business")) plan = "business";
 
-    console.log(`[Lemon] ${eventName} — ${email} → ${plan}`);
+    console.log(`[Lemon] ${eventName} -- ${email} -> ${plan}`);
 
     if (eventName === "subscription_created" || eventName === "subscription_updated" || eventName === "subscription_resumed") {
       const user = findUserByEmail(email) || findUserByLemonCustomerId(customerId);
@@ -144,12 +238,12 @@ app.post("/api/webhooks/lemonsqueezy", express.raw({ type: "application/json" })
       }
     }
 
-    // order_created — for one-time payments
+    // order_created -- for one-time payments
     if (eventName === "order_created") {
       const user = findUserByEmail(email) || findUserByLemonCustomerId(customerId);
       if (user) {
         upgradePlan(user.id, plan, { customerId });
-        console.log(`[Lemon] Order: ${email} → ${plan}`);
+        console.log(`[Lemon] Order: ${email} -> ${plan}`);
       }
     }
 
@@ -162,7 +256,7 @@ app.post("/api/webhooks/lemonsqueezy", express.raw({ type: "application/json" })
 
 // --- Security: Rate limiting (in-memory, per-key) ---
 const rateLimits = new Map();
-function rateLimit(key, maxPerMinute = 30) {
+function rateLimitCustom(key, maxPerMinute = 30) {
   const now = Date.now();
   const window = 60_000;
   const hits = rateLimits.get(key) || [];
@@ -203,7 +297,7 @@ function webhookAuth(req, res, next) {
   if (!WEBHOOK_SECRET) return next(); // no secret = no protection (dev mode)
   const provided = req.headers["x-webhook-secret"] || req.query.secret;
   if (provided !== WEBHOOK_SECRET) {
-    return res.status(401).json({ error: "Ungültiger Webhook-Secret. Setze x-webhook-secret Header." });
+    return res.status(401).json({ error: "Ungueltiger Webhook-Secret. Setze x-webhook-secret Header." });
   }
   next();
 }
@@ -239,21 +333,11 @@ const upload = multer({
 // Serve uploaded files
 app.use("/uploads", express.static(UPLOADS_DIR));
 
-// --- Posts Database (JSON file) ---
-function loadPosts() {
-  if (fsExists(POSTS_DB)) return JSON.parse(readFileSync(POSTS_DB, "utf-8"));
-  return [];
-}
-
-function savePosts(posts) {
-  writeFileSync(POSTS_DB, JSON.stringify(posts, null, 2));
-}
-
 // === MEDIA UPLOAD & LIBRARY ===
 
 // Upload files (max 5 at once)
 app.post("/api/media/upload", (req, res) => {
-  if (!rateLimit(req.ip, 60)) return res.status(429).json({ error: "Zu viele Uploads. Bitte warte kurz." });
+  if (!rateLimitCustom(req.ip, 60)) return res.status(429).json({ error: "Zu viele Uploads. Bitte warte kurz." });
 
   upload.array("files", 5)(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -326,138 +410,138 @@ app.delete("/api/media/:filename", (req, res) => {
   }
 });
 
-// === POST MANAGEMENT ===
+// === POST MANAGEMENT (SQLite-backed) ===
 
 // Create a new post
 app.post("/api/posts", optionalAuth, (req, res) => {
-  if (!rateLimit(req.ip, 30)) return res.status(429).json({ error: "Rate limit" });
+  if (!rateLimitCustom(req.ip, 30)) return res.status(429).json({ error: "Rate limit" });
 
-  const { text, media, platforms, scheduledAt, tags } = req.body;
-  if (!text && (!media || media.length === 0)) {
-    return res.status(400).json({ error: "Text oder Medien erforderlich" });
-  }
+  try {
+    const { text, media, platforms, scheduledAt, tags } = req.body;
+    if (!text && (!media || media.length === 0)) {
+      return res.status(400).json({ error: "Text oder Medien erforderlich" });
+    }
 
-  // Validate text length
-  if (text && text.length > 10000) {
-    return res.status(400).json({ error: "Text zu lang (max 10.000 Zeichen)" });
-  }
+    // Validate inputs
+    validateString(text, "text", { maxLength: 10000 });
+    validateArray(media, "media", { maxItems: 10 });
+    validateArray(platforms, "platforms", { maxItems: 10 });
+    validateArray(tags, "tags", { maxItems: 20 });
 
-  // Validate media references exist
-  if (media && Array.isArray(media)) {
-    for (const m of media) {
-      const safeName = path.basename(m.filename || "");
-      const filePath = path.join(UPLOADS_DIR, safeName);
-      if (!fsExists(filePath)) {
-        return res.status(400).json({ error: `Mediendatei nicht gefunden: ${safeName}` });
+    // Validate media references exist
+    if (media && Array.isArray(media)) {
+      for (const m of media) {
+        const safeName = path.basename(m.filename || "");
+        const filePath = path.join(UPLOADS_DIR, safeName);
+        if (!fsExists(filePath)) {
+          return res.status(400).json({ error: `Mediendatei nicht gefunden: ${safeName}` });
+        }
       }
     }
-  }
 
-  const post = {
-    id: crypto.randomUUID(),
-    text: text || "",
-    media: (media || []).map(m => ({
-      ...m,
-      filename: path.basename(m.filename || ""), // sanitize
-    })),
-    platforms: platforms || [],
-    tags: tags || [],
-    status: scheduledAt ? "scheduled" : "draft",
-    scheduledAt: scheduledAt || null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    postedAt: null,
-    postResults: null,
-  };
+    const post = {
+      id: crypto.randomUUID(),
+      text: sanitizeHtml(text || ""),
+      media: (media || []).map(m => ({
+        ...m,
+        filename: path.basename(m.filename || ""), // sanitize
+      })),
+      platforms: platforms || [],
+      tags: tags || [],
+      status: scheduledAt ? "scheduled" : "draft",
+      scheduledAt: scheduledAt || null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      postedAt: null,
+      postResults: null,
+    };
 
-  const posts = loadPosts();
-  posts.unshift(post);
-  savePosts(posts);
+    dbInsertPost(post);
 
-  // If scheduled, register with scheduler
-  if (scheduledAt) {
-    schedulePost({
-      id: `post-${post.id}`,
-      content: post.text,
-      platforms: post.platforms,
-      scheduledAt,
-    });
-  }
-
-  res.json({ success: true, post });
-});
-
-// Get all posts (with optional status filter)
-app.get("/api/posts", (req, res) => {
-  const posts = loadPosts();
-  const { status } = req.query;
-  const filtered = status ? posts.filter(p => p.status === status) : posts;
-  res.json({ posts: filtered });
-});
-
-// Get a single post
-app.get("/api/posts/:id", (req, res) => {
-  const posts = loadPosts();
-  const post = posts.find(p => p.id === req.params.id);
-  if (!post) return res.status(404).json({ error: "Post nicht gefunden" });
-  res.json(post);
-});
-
-// Update a post
-app.put("/api/posts/:id", (req, res) => {
-  const posts = loadPosts();
-  const idx = posts.findIndex(p => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: "Post nicht gefunden" });
-
-  const post = posts[idx];
-  if (post.status === "posted") return res.status(400).json({ error: "Bereits gepostete Posts können nicht bearbeitet werden" });
-
-  const { text, media, platforms, scheduledAt, tags, status } = req.body;
-
-  if (text !== undefined) post.text = text.slice(0, 10000);
-  if (media !== undefined) post.media = media.map(m => ({ ...m, filename: path.basename(m.filename || "") }));
-  if (platforms !== undefined) post.platforms = platforms;
-  if (tags !== undefined) post.tags = tags;
-  if (status && ["draft", "scheduled"].includes(status)) post.status = status;
-  if (scheduledAt !== undefined) {
-    post.scheduledAt = scheduledAt;
+    // If scheduled, register with scheduler
     if (scheduledAt) {
-      post.status = "scheduled";
-      // Cancel old schedule, create new one
-      cancelJob(`post-${post.id}`);
       schedulePost({
         id: `post-${post.id}`,
         content: post.text,
         platforms: post.platforms,
         scheduledAt,
       });
-    } else {
-      post.status = "draft";
-      cancelJob(`post-${post.id}`);
     }
+
+    res.json({ success: true, post });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
-  post.updatedAt = new Date().toISOString();
-  posts[idx] = post;
-  savePosts(posts);
-  res.json({ success: true, post });
+});
+
+// Get all posts (with optional status filter)
+app.get("/api/posts", (req, res) => {
+  const { status } = req.query;
+  const posts = status ? dbGetPostsByStatus(status) : dbGetAllPosts();
+  res.json({ posts });
+});
+
+// Get a single post
+app.get("/api/posts/:id", (req, res) => {
+  const post = dbGetPostById(req.params.id);
+  if (!post) return res.status(404).json({ error: "Post nicht gefunden" });
+  res.json(post);
+});
+
+// Update a post
+app.put("/api/posts/:id", (req, res) => {
+  try {
+    const post = dbGetPostById(req.params.id);
+    if (!post) return res.status(404).json({ error: "Post nicht gefunden" });
+    if (post.status === "posted") return res.status(400).json({ error: "Bereits gepostete Posts koennen nicht bearbeitet werden" });
+
+    const { text, media, platforms, scheduledAt, tags, status } = req.body;
+
+    const updates = { updatedAt: new Date().toISOString() };
+    if (text !== undefined) { validateString(text, "text", { maxLength: 10000 }); updates.text = sanitizeHtml(text); }
+    if (media !== undefined) { validateArray(media, "media", { maxItems: 10 }); updates.media = media.map(m => ({ ...m, filename: path.basename(m.filename || "") })); }
+    if (platforms !== undefined) { validateArray(platforms, "platforms", { maxItems: 10 }); updates.platforms = platforms; }
+    if (tags !== undefined) { validateArray(tags, "tags", { maxItems: 20 }); updates.tags = tags; }
+    if (status && ["draft", "scheduled"].includes(status)) updates.status = status;
+    if (scheduledAt !== undefined) {
+      updates.scheduledAt = scheduledAt;
+      if (scheduledAt) {
+        updates.status = "scheduled";
+        cancelJob(`post-${post.id}`);
+        schedulePost({
+          id: `post-${post.id}`,
+          content: updates.text || post.text,
+          platforms: updates.platforms || post.platforms,
+          scheduledAt,
+        });
+      } else {
+        updates.status = "draft";
+        cancelJob(`post-${post.id}`);
+      }
+    }
+
+    dbUpdatePost(req.params.id, updates);
+    const updatedPost = dbGetPostById(req.params.id);
+    res.json({ success: true, post: updatedPost });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Delete a post
 app.delete("/api/posts/:id", (req, res) => {
-  const posts = loadPosts();
-  const idx = posts.findIndex(p => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: "Post nicht gefunden" });
+  const post = dbGetPostById(req.params.id);
+  if (!post) return res.status(404).json({ error: "Post nicht gefunden" });
 
   // Cancel any scheduled job
-  cancelJob(`post-${posts[idx].id}`);
-  posts.splice(idx, 1);
-  savePosts(posts);
+  cancelJob(`post-${post.id}`);
+  dbDeletePost(req.params.id);
   res.json({ success: true });
 });
 
 // Publish a post immediately
 app.post("/api/posts/:id/publish", optionalAuth, async (req, res) => {
-  if (!rateLimit(req.ip, 10)) return res.status(429).json({ error: "Rate limit" });
+  if (!rateLimitCustom(req.ip, 10)) return res.status(429).json({ error: "Rate limit" });
 
   // Check plan limits if user is logged in
   if (req.user) {
@@ -467,11 +551,8 @@ app.post("/api/posts/:id/publish", optionalAuth, async (req, res) => {
     }
   }
 
-  const posts = loadPosts();
-  const idx = posts.findIndex(p => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: "Post nicht gefunden" });
-
-  const post = posts[idx];
+  const post = dbGetPostById(req.params.id);
+  if (!post) return res.status(404).json({ error: "Post nicht gefunden" });
   if (post.status === "posted") return res.status(400).json({ error: "Bereits gepostet" });
   if (post.platforms.length === 0) return res.status(400).json({ error: "Keine Plattformen ausgewaehlt" });
 
@@ -489,11 +570,11 @@ app.post("/api/posts/:id/publish", optionalAuth, async (req, res) => {
     }
   }
 
-  post.status = "posted";
-  post.postedAt = new Date().toISOString();
-  post.postResults = results;
-  posts[idx] = post;
-  savePosts(posts);
+  dbUpdatePost(post.id, {
+    status: "posted",
+    postedAt: new Date().toISOString(),
+    postResults: results,
+  });
 
   // Increment post counter
   if (req.user) incrementPostCount(req.user.id);
@@ -507,8 +588,7 @@ app.post("/api/posts/:id/publish", optionalAuth, async (req, res) => {
 
 // Duplicate a post
 app.post("/api/posts/:id/duplicate", (req, res) => {
-  const posts = loadPosts();
-  const original = posts.find(p => p.id === req.params.id);
+  const original = dbGetPostById(req.params.id);
   if (!original) return res.status(404).json({ error: "Post nicht gefunden" });
 
   const dupe = {
@@ -521,14 +601,13 @@ app.post("/api/posts/:id/duplicate", (req, res) => {
     postedAt: null,
     postResults: null,
   };
-  posts.unshift(dupe);
-  savePosts(posts);
+  dbInsertPost(dupe);
   res.json({ success: true, post: dupe });
 });
 
 // Get post stats
 app.get("/api/posts/stats/overview", (_req, res) => {
-  const posts = loadPosts();
+  const posts = dbGetAllPosts();
   res.json({
     total: posts.length,
     drafts: posts.filter(p => p.status === "draft").length,
@@ -565,13 +644,20 @@ app.get("/api/models", (_req, res) => {
 });
 
 // Generate content
-app.post("/api/generate", async (req, res) => {
-  if (!rateLimit(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute. Bitte warte kurz." });
+app.post("/api/generate", aiLimiter, async (req, res) => {
+  if (!rateLimitCustom(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute. Bitte warte kurz." });
   if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT} AI-Calls/Tag).`, ...getAIBudgetRemaining(req.ip) });
 
   const { modelId, prompt } = req.body;
-  const config = MODELS[modelId];
 
+  try {
+    validateString(modelId, "modelId", { required: true, maxLength: 50 });
+    validateString(prompt, "prompt", { required: true, maxLength: 50000 });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  const config = MODELS[modelId];
   if (!config) return res.status(400).json({ error: `Unknown model: ${modelId}` });
 
   try {
@@ -664,7 +750,6 @@ import {
   pickTemplate,
   generatePostSchedule,
 } from "./engagement-engine.js";
-// readFileSync, writeFileSync, existsSync already imported at top
 
 const CONFIG_PATH = "./engagement-config.json";
 
@@ -722,14 +807,14 @@ app.post("/api/engagement/rules", (req, res) => {
 });
 
 // Generate a natural engagement reply using AI
-app.post("/api/engagement/generate-reply", async (req, res) => {
-  if (!rateLimit(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 Reply-Calls/Minute." });
+app.post("/api/engagement/generate-reply", aiLimiter, async (req, res) => {
+  if (!rateLimitCustom(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 Reply-Calls/Minute." });
   if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
 
-  const { platform, postContent, commentToReply, modelId } = req.body;
+  const { platform, postContent: postContentText, commentToReply, modelId } = req.body;
   const config = loadEngagementConfig();
   const prompt = buildEngagementPrompt(
-    { platform, postContent, commentToReply },
+    { platform, postContent: postContentText, commentToReply },
     config.personality
   );
 
@@ -825,7 +910,7 @@ app.get("/api/platforms", (_req, res) => {
   res.json(status);
 });
 
-// Start OAuth flow — returns the authorization URL
+// Start OAuth flow -- returns the authorization URL
 app.get("/auth/:platform/connect", (req, res) => {
   const { platform } = req.params;
   if (!SUPPORTED_PLATFORMS.includes(platform)) return res.status(400).json({ error: "Unknown platform" });
@@ -928,8 +1013,8 @@ app.get("/api/media/providers", (_req, res) => {
 });
 
 // Generate AI image
-app.post("/api/media/image", async (req, res) => {
-  if (!rateLimit(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute." });
+app.post("/api/media/image", aiLimiter, async (req, res) => {
+  if (!rateLimitCustom(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute." });
   if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
 
   const { topic, style, customPrompt, aspectRatio } = req.body;
@@ -943,8 +1028,8 @@ app.post("/api/media/image", async (req, res) => {
 });
 
 // Generate AI video
-app.post("/api/media/video", async (req, res) => {
-  if (!rateLimit(`ai:${req.ip}`, 5)) return res.status(429).json({ error: "Max 5 Video-Calls/Minute." });
+app.post("/api/media/video", aiLimiter, async (req, res) => {
+  if (!rateLimitCustom(`ai:${req.ip}`, 5)) return res.status(429).json({ error: "Max 5 Video-Calls/Minute." });
   if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
 
   const { prompt, imageUrl } = req.body;
@@ -956,9 +1041,9 @@ app.post("/api/media/video", async (req, res) => {
   }
 });
 
-// Full pipeline: Content → Image → Video
-app.post("/api/media/full-pipeline", async (req, res) => {
-  if (!rateLimit(`ai:${req.ip}`, 3)) return res.status(429).json({ error: "Max 3 Pipeline-Calls/Minute." });
+// Full pipeline: Content -> Image -> Video
+app.post("/api/media/full-pipeline", aiLimiter, async (req, res) => {
+  if (!rateLimitCustom(`ai:${req.ip}`, 3)) return res.status(429).json({ error: "Max 3 Pipeline-Calls/Minute." });
   if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
 
   const { content, topic, format, aspectRatio } = req.body;
@@ -1063,18 +1148,14 @@ app.get("/api/video/list", (_req, res) => {
 });
 
 // === n8n / Make / Zapier WEBHOOK API ===
-// Diese Endpoints sind so gebaut, dass n8n sie direkt aufrufen kann
 
 // n8n Webhook: Content generieren lassen
-// In n8n: HTTP Request Node → POST ${BACKEND_URL}/api/webhook/generate
-// Auth: Set WEBHOOK_SECRET in .env, send as x-webhook-secret header
 app.post("/api/webhook/generate", webhookAuth, async (req, res) => {
   const { topic, format, style, lang, modelId, callbackUrl } = req.body;
 
   addLog({ type: "webhook_received", action: "generate", topic, format });
 
   try {
-    // Build prompt internally
     const topicLabel = topic || "Business";
     const prompt = `Create social media content about: ${topicLabel}. Format: ${format || "reel-script"}. Style: ${style || "educational"}. Language: ${lang || "de"}`;
 
@@ -1088,7 +1169,6 @@ app.post("/api/webhook/generate", webhookAuth, async (req, res) => {
 
     const result = { success: true, content: data.text, topic, format, style };
 
-    // Callback to n8n if URL provided
     if (callbackUrl) {
       fetch(callbackUrl, {
         method: "POST",
@@ -1104,7 +1184,6 @@ app.post("/api/webhook/generate", webhookAuth, async (req, res) => {
 });
 
 // n8n Webhook: Direkt auf Plattform posten
-// In n8n: HTTP Request Node → POST ${BACKEND_URL}/api/webhook/post
 app.post("/api/webhook/post", webhookAuth, async (req, res) => {
   const { text, platforms, callbackUrl } = req.body;
 
@@ -1154,7 +1233,7 @@ app.post("/api/webhook/image", webhookAuth, async (req, res) => {
   }
 });
 
-// n8n Webhook: Komplette Pipeline (Content → Bild → Video → Posten)
+// n8n Webhook: Komplette Pipeline (Content -> Bild -> Video -> Posten)
 app.post("/api/webhook/full-pipeline", webhookAuth, async (req, res) => {
   const { topic, format, style, platforms, callbackUrl } = req.body;
 
@@ -1207,7 +1286,7 @@ app.post("/api/webhook/full-pipeline", webhookAuth, async (req, res) => {
   }
 });
 
-// n8n Webhook: Eingehender Kommentar → AI-Antwort generieren
+// n8n Webhook: Eingehender Kommentar -> AI-Antwort generieren
 app.post("/api/webhook/incoming-comment", webhookAuth, async (req, res) => {
   const { platform, postId, commentText, commentAuthor, callbackUrl } = req.body;
 
@@ -1299,9 +1378,21 @@ app.get("/api/ai/budget", (req, res) => {
 // === HEALTH CHECK ===
 app.get("/api/health", (_req, res) => {
   const scheduler = getSchedulerStatus();
+  const dbStatus = dbHealthCheck();
+
+  const envCheck = {
+    NODE_ENV: process.env.NODE_ENV || "development",
+    JWT_SECRET: !!process.env.JWT_SECRET,
+    APP_URL: !!process.env.APP_URL,
+    BACKEND_URL: !!process.env.BACKEND_URL,
+  };
+
   res.json({
-    status: "ok",
+    status: dbStatus.connected ? "ok" : "degraded",
     uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    database: dbStatus,
+    environment: envCheck,
     scheduler: {
       scheduledJobs: scheduler.scheduled,
       recurringJobs: scheduler.recurring,
@@ -1327,12 +1418,34 @@ if (isProduction) {
   });
 }
 
-// --- Global error handler ---
+// === GLOBAL ERROR HANDLER ===
 app.use((err, _req, res, _next) => {
-  console.error(`[${new Date().toISOString()}] Error:`, err.message);
-  res.status(err.status || 500).json({
+  const timestamp = new Date().toISOString();
+  const statusCode = err.status || err.statusCode || 500;
+
+  // Log error to file
+  const logEntry = `[${timestamp}] ${statusCode} ${err.message}\n${isProduction ? "" : err.stack || ""}\n`;
+  try {
+    appendFileSync(ERRORS_LOG, logEntry);
+  } catch {
+    // If we can't write to the log file, log to console
+  }
+
+  console.error(`[${timestamp}] Error:`, err.message);
+
+  // Structured error response
+  const response = {
     error: isProduction ? "Internal server error" : err.message,
-  });
+    statusCode,
+    timestamp,
+  };
+
+  // In dev mode, include stack trace
+  if (!isProduction) {
+    response.stack = err.stack;
+  }
+
+  res.status(statusCode).json(response);
 });
 
 // --- Environment validation ---
@@ -1342,7 +1455,13 @@ function validateEnv() {
     warnings.push("No AI provider keys set (ANTHROPIC_API_KEY or OPENAI_API_KEY)");
   }
   if (isProduction && !process.env.APP_URL) {
-    warnings.push("APP_URL not set — CORS will block all origins in production");
+    warnings.push("APP_URL not set -- CORS will block all origins in production");
+  }
+  if (isProduction && !process.env.JWT_SECRET) {
+    warnings.push("JWT_SECRET not set -- this is required in production");
+  }
+  if (isProduction && !process.env.WEBHOOK_SECRET) {
+    warnings.push("WEBHOOK_SECRET not set -- webhook endpoints are unprotected");
   }
   if (warnings.length) {
     console.warn("\nWarnings:");
@@ -1355,10 +1474,11 @@ const server = app.listen(PORT, () => {
   console.log(`\nMythos ${isProduction ? "[PRODUCTION]" : "[DEV]"} running on port ${PORT}`);
   if (isProduction) console.log(`  Serving frontend from ./dist`);
   console.log(`  Backend URL: ${BACKEND_URL}`);
+  console.log(`  Database: SQLite (mythos.db)`);
   console.log("\nAI Providers:");
   console.log(`  Anthropic: ${process.env.ANTHROPIC_API_KEY ? "OK" : "- (set ANTHROPIC_API_KEY in .env)"}`);
   console.log(`  OpenAI:    ${process.env.OPENAI_API_KEY ? "OK" : "- (set OPENAI_API_KEY in .env)"}`);
-  console.log(`  Ollama:    → ${process.env.OLLAMA_BASE_URL || "http://localhost:11434"}`);
+  console.log(`  Ollama:    -> ${process.env.OLLAMA_BASE_URL || "http://localhost:11434"}`);
   console.log("\nPlatforms:");
   console.log(`  YouTube:   ${process.env.YOUTUBE_CLIENT_ID ? "OK" : "-"}`);
   console.log(`  X:         ${process.env.X_CLIENT_ID ? "OK" : "-"}`);
@@ -1369,5 +1489,13 @@ const server = app.listen(PORT, () => {
 });
 
 // --- Graceful shutdown ---
-process.on("SIGTERM", () => { console.log("SIGTERM — shutting down..."); server.close(() => process.exit(0)); });
-process.on("SIGINT", () => { console.log("\nSIGINT — shutting down..."); server.close(() => process.exit(0)); });
+function gracefulShutdown(signal) {
+  console.log(`\n${signal} -- shutting down...`);
+  closeDb();
+  server.close(() => process.exit(0));
+  // Force exit after 10s if graceful shutdown hangs
+  setTimeout(() => process.exit(1), 10000);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

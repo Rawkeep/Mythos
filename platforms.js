@@ -1,33 +1,32 @@
-// Platform OAuth + Posting Connectors
-import { readFileSync, writeFileSync, existsSync } from "fs";
+// Platform OAuth + Posting Connectors (SQLite-backed)
 import crypto from "crypto";
-
-const TOKENS_PATH = "./platform-tokens.json";
+import {
+  dbGetAllTokens, dbGetToken, dbSaveToken, dbRemoveToken,
+} from "./db.js";
 
 // --- Token Storage ---
 export function loadTokens() {
-  if (existsSync(TOKENS_PATH)) return JSON.parse(readFileSync(TOKENS_PATH, "utf-8"));
-  return {};
-}
-
-export function saveTokens(tokens) {
-  writeFileSync(TOKENS_PATH, JSON.stringify(tokens, null, 2));
+  return dbGetAllTokens();
 }
 
 export function saveToken(platform, tokenData) {
-  const tokens = loadTokens();
-  tokens[platform] = { ...tokenData, connectedAt: new Date().toISOString() };
-  saveTokens(tokens);
+  dbSaveToken(platform, { ...tokenData, connectedAt: new Date().toISOString() });
 }
 
 export function getToken(platform) {
-  return loadTokens()[platform] || null;
+  return dbGetToken(platform);
 }
 
 export function removeToken(platform) {
-  const tokens = loadTokens();
-  delete tokens[platform];
-  saveTokens(tokens);
+  dbRemoveToken(platform);
+}
+
+// We no longer need saveTokens since we use per-platform operations,
+// but keep it for internal compatibility
+function saveTokens(tokens) {
+  for (const [platform, data] of Object.entries(tokens)) {
+    dbSaveToken(platform, data);
+  }
 }
 
 // --- OAuth URL Builders ---
@@ -53,9 +52,7 @@ export function getAuthUrl(platform) {
       const codeVerifier = crypto.randomBytes(32).toString("base64url");
       const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
       // Store verifier for token exchange
-      const tokens = loadTokens();
-      tokens._x_verifier = codeVerifier;
-      saveTokens(tokens);
+      dbSaveToken("_x_verifier", codeVerifier);
 
       const params = new URLSearchParams({
         response_type: "code",
@@ -146,8 +143,7 @@ export async function exchangeCode(platform, code) {
     }
 
     case "x": {
-      const tokens = loadTokens();
-      const codeVerifier = tokens._x_verifier;
+      const codeVerifier = dbGetToken("_x_verifier");
       const credentials = Buffer.from(`${process.env.X_CLIENT_ID}:${process.env.X_CLIENT_SECRET}`).toString("base64");
 
       const resp = await fetch("https://api.twitter.com/2/oauth2/token", {
@@ -183,11 +179,6 @@ export async function exchangeCode(platform, code) {
 
     case "instagram": {
       // Exchange for short-lived token
-      const resp = await fetch("https://graph.facebook.com/v21.0/oauth/access_token", {
-        method: "GET",
-        headers: { "Content-Type": "application/json" },
-      });
-      // Use URL params approach
       const url = `https://graph.facebook.com/v21.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&redirect_uri=${encodeURIComponent(backendUrl + "/auth/instagram/callback")}&code=${code}`;
       const tokenResp = await fetch(url).then(r => r.json());
 
@@ -444,9 +435,6 @@ export async function postContent(platform, content) {
     }
 
     case "youtube": {
-      // YouTube requires video upload — for community posts or video metadata
-      // This posts a community post (text-only)
-      // Note: Community posts API is limited; for videos, use resumable upload
       return {
         success: false,
         error: "YouTube requires video file upload. Use the scheduler to prepare content, then upload via YouTube Studio.",
@@ -455,10 +443,9 @@ export async function postContent(platform, content) {
     }
 
     case "tiktok": {
-      // TikTok requires video upload
       return {
         success: false,
-        error: "TikTok requires video file upload. Content has been copied — open TikTok to upload.",
+        error: "TikTok requires video file upload. Content has been copied -- open TikTok to upload.",
         uploadUrl: "https://www.tiktok.com/upload",
       };
     }
