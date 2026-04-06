@@ -452,9 +452,11 @@ export default function FacelessContentFactory({ user, onLogout }) {
   };
 
   const renderInline = (text) => {
-    const parts = text.split(/(\*\*.*?\*\*|\[.*?\])/g);
+    const parts = text.split(/(\*\*.*?\*\*|\[.*?\]\(.*?\)|\[.*?\])/g);
     return parts.map((part, i) => {
       if (part.startsWith("**") && part.endsWith("**")) return <strong key={i} style={{ color: "#fff", fontWeight: 700 }}>{part.slice(2, -2)}</strong>;
+      const linkMatch = part.match(/^\[(.*?)\]\((.*?)\)$/);
+      if (linkMatch) return <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" style={{ color: "#E8A838", textDecoration: "underline" }}>{linkMatch[1]}</a>;
       if (part.startsWith("[") && part.endsWith("]")) return <span key={i} style={{ color: "#9B59B6", fontStyle: "italic", fontSize: "0.9em" }}>{part}</span>;
       return <span key={i}>{part}</span>;
     });
