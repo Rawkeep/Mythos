@@ -290,6 +290,33 @@ function getAIBudgetRemaining(ip) {
   return { used, limit: AI_DAILY_LIMIT, remaining: AI_DAILY_LIMIT - used };
 }
 
+// --- BYOK (Bring Your Own Key) support ---
+// Users can send their own API keys via headers to bypass server budget limits
+function extractUserKeys(req) {
+  return {
+    anthropic: req.headers["x-user-anthropic-key"] || null,
+    openai: req.headers["x-user-openai-key"] || null,
+    stability: req.headers["x-user-stability-key"] || null,
+    fal: req.headers["x-user-fal-key"] || null,
+    replicate: req.headers["x-user-replicate-key"] || null,
+  };
+}
+
+function getApiKey(provider, userKeys) {
+  const envMap = {
+    anthropic: "ANTHROPIC_API_KEY",
+    openai: "OPENAI_API_KEY",
+    stability: "STABILITY_API_KEY",
+    fal: "FAL_KEY",
+    replicate: "REPLICATE_API_TOKEN",
+  };
+  return (userKeys && userKeys[provider]) || process.env[envMap[provider]] || null;
+}
+
+function isByok(userKeys) {
+  return userKeys && Object.values(userKeys).some(k => !!k);
+}
+
 // --- Security: Webhook authentication ---
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || null;
 
@@ -632,21 +659,26 @@ const MODELS = {
 };
 
 // List available models + check which providers have keys configured
-app.get("/api/models", (_req, res) => {
+app.get("/api/models", (req, res) => {
+  const userKeys = extractUserKeys(req);
   const available = Object.entries(MODELS).map(([id, { provider, model }]) => {
     let ready = false;
-    if (provider === "anthropic") ready = !!process.env.ANTHROPIC_API_KEY;
-    else if (provider === "openai") ready = !!process.env.OPENAI_API_KEY;
-    else if (provider === "ollama") ready = true; // always available if Ollama runs
+    if (provider === "anthropic") ready = !!(getApiKey("anthropic", userKeys));
+    else if (provider === "openai") ready = !!(getApiKey("openai", userKeys));
+    else if (provider === "ollama") ready = true;
     return { id, provider, model, ready };
   });
-  res.json({ models: available });
+  const budget = getAIBudgetRemaining(req.ip);
+  res.json({ models: available, freemium: true, byok: isByok(userKeys), ...budget });
 });
 
 // Generate content
 app.post("/api/generate", aiLimiter, async (req, res) => {
+  const userKeys = extractUserKeys(req);
+  const byok = isByok(userKeys);
+
   if (!rateLimitCustom(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute. Bitte warte kurz." });
-  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT} AI-Calls/Tag).`, ...getAIBudgetRemaining(req.ip) });
+  if (!byok && !checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT} AI-Calls/Tag). Eigene API-Keys eingeben für unbegrenzte Nutzung.`, needsKeys: true, ...getAIBudgetRemaining(req.ip) });
 
   const { modelId, prompt } = req.body;
 
@@ -664,8 +696,8 @@ app.post("/api/generate", aiLimiter, async (req, res) => {
     let text;
 
     if (config.provider === "anthropic") {
-      const key = process.env.ANTHROPIC_API_KEY;
-      if (!key) return res.status(400).json({ error: "ANTHROPIC_API_KEY not set in .env" });
+      const key = getApiKey("anthropic", userKeys);
+      if (!key) return res.status(400).json({ error: "Kein Anthropic API-Key verfügbar. Bitte eigenen Key eingeben.", needsKeys: true });
 
       const resp = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
@@ -689,8 +721,8 @@ app.post("/api/generate", aiLimiter, async (req, res) => {
       text = data.content?.map(b => b.text || "").join("\n") || "";
 
     } else if (config.provider === "openai") {
-      const key = process.env.OPENAI_API_KEY;
-      if (!key) return res.status(400).json({ error: "OPENAI_API_KEY not set in .env" });
+      const key = getApiKey("openai", userKeys);
+      if (!key) return res.status(400).json({ error: "Kein OpenAI API-Key verfügbar. Bitte eigenen Key eingeben.", needsKeys: true });
 
       const resp = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -733,7 +765,8 @@ app.post("/api/generate", aiLimiter, async (req, res) => {
       text = data.message?.content || "";
     }
 
-    res.json({ text });
+    const remaining = byok ? null : getAIBudgetRemaining(req.ip);
+    res.json({ text, ...(remaining && { remaining: remaining.remaining, limit: remaining.limit }) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -808,8 +841,11 @@ app.post("/api/engagement/rules", (req, res) => {
 
 // Generate a natural engagement reply using AI
 app.post("/api/engagement/generate-reply", aiLimiter, async (req, res) => {
+  const userKeys = extractUserKeys(req);
+  const byok = isByok(userKeys);
+
   if (!rateLimitCustom(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 Reply-Calls/Minute." });
-  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+  if (!byok && !checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag). Eigene API-Keys eingeben für unbegrenzte Nutzung.`, needsKeys: true, ...getAIBudgetRemaining(req.ip) });
 
   const { platform, postContent: postContentText, commentToReply, modelId } = req.body;
   const config = loadEngagementConfig();
@@ -826,8 +862,8 @@ app.post("/api/engagement/generate-reply", aiLimiter, async (req, res) => {
     let text = "";
 
     if (modelConfig.provider === "anthropic") {
-      const key = process.env.ANTHROPIC_API_KEY;
-      if (!key) return res.status(400).json({ error: "ANTHROPIC_API_KEY not set" });
+      const key = getApiKey("anthropic", userKeys);
+      if (!key) return res.status(400).json({ error: "Kein Anthropic API-Key verfügbar.", needsKeys: true });
       const resp = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
@@ -836,8 +872,8 @@ app.post("/api/engagement/generate-reply", aiLimiter, async (req, res) => {
       const data = await resp.json();
       text = data.content?.map(b => b.text || "").join("") || "";
     } else if (modelConfig.provider === "openai") {
-      const key = process.env.OPENAI_API_KEY;
-      if (!key) return res.status(400).json({ error: "OPENAI_API_KEY not set" });
+      const key = getApiKey("openai", userKeys);
+      if (!key) return res.status(400).json({ error: "Kein OpenAI API-Key verfügbar.", needsKeys: true });
       const resp = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
@@ -998,24 +1034,28 @@ app.post("/api/platforms/:platform/like", async (req, res) => {
 // --- AI Image & Video Generation ---
 
 // Check available AI media providers
-app.get("/api/media/providers", (_req, res) => {
+app.get("/api/media/providers", (req, res) => {
+  const userKeys = extractUserKeys(req);
   res.json({
     image: {
-      "dall-e-3": !!process.env.OPENAI_API_KEY,
-      "stability-ai": !!process.env.STABILITY_API_KEY,
-      "fal-flux": !!process.env.FAL_KEY,
+      "dall-e-3": !!(getApiKey("openai", userKeys)),
+      "stability-ai": !!(getApiKey("stability", userKeys)),
+      "fal-flux": !!(getApiKey("fal", userKeys)),
     },
     video: {
-      "replicate": !!process.env.REPLICATE_API_TOKEN,
-      "fal-minimax": !!process.env.FAL_KEY,
+      "replicate": !!(getApiKey("replicate", userKeys)),
+      "fal-minimax": !!(getApiKey("fal", userKeys)),
     },
+    byok: isByok(userKeys),
   });
 });
 
 // Generate AI image
 app.post("/api/media/image", aiLimiter, async (req, res) => {
+  const userKeys = extractUserKeys(req);
+  const byok = isByok(userKeys);
   if (!rateLimitCustom(`ai:${req.ip}`, 10)) return res.status(429).json({ error: "Max 10 AI-Calls/Minute." });
-  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+  if (!byok && !checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag). Eigene Keys eingeben für unbegrenzt.`, needsKeys: true, ...getAIBudgetRemaining(req.ip) });
 
   const { topic, style, customPrompt, aspectRatio } = req.body;
   try {
@@ -1029,8 +1069,10 @@ app.post("/api/media/image", aiLimiter, async (req, res) => {
 
 // Generate AI video
 app.post("/api/media/video", aiLimiter, async (req, res) => {
+  const userKeys = extractUserKeys(req);
+  const byok = isByok(userKeys);
   if (!rateLimitCustom(`ai:${req.ip}`, 5)) return res.status(429).json({ error: "Max 5 Video-Calls/Minute." });
-  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+  if (!byok && !checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag). Eigene Keys eingeben für unbegrenzt.`, needsKeys: true, ...getAIBudgetRemaining(req.ip) });
 
   const { prompt, imageUrl } = req.body;
   try {
@@ -1041,10 +1083,12 @@ app.post("/api/media/video", aiLimiter, async (req, res) => {
   }
 });
 
-// Full pipeline: Content -> Image -> Video
+// Full pipeline: Content → Image → Video
 app.post("/api/media/full-pipeline", aiLimiter, async (req, res) => {
+  const userKeys = extractUserKeys(req);
+  const byok = isByok(userKeys);
   if (!rateLimitCustom(`ai:${req.ip}`, 3)) return res.status(429).json({ error: "Max 3 Pipeline-Calls/Minute." });
-  if (!checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag).`, ...getAIBudgetRemaining(req.ip) });
+  if (!byok && !checkAIBudget(req.ip)) return res.status(429).json({ error: `Tages-Limit erreicht (${AI_DAILY_LIMIT}/Tag). Eigene Keys eingeben für unbegrenzt.`, needsKeys: true, ...getAIBudgetRemaining(req.ip) });
 
   const { content, topic, format, aspectRatio } = req.body;
   try {

@@ -176,17 +176,39 @@ export default function FacelessContentFactory({ user, onLogout }) {
   const [showEngagement, setShowEngagement] = useState(false);
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("selected_model") || "claude-sonnet");
+  const [budgetInfo, setBudgetInfo] = useState({ remaining: 0, limit: 100, byok: false });
+  const [userKeys, setUserKeys] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mythos_user_keys") || "{}"); } catch { return {}; }
+  });
   const [engConfig, setEngConfig] = useState(null);
   const [testReply, setTestReply] = useState("");
   const [testLoading, setTestLoading] = useState(false);
   const resultRef = useRef(null);
 
+  const byokHeaders = () => {
+    const h = {};
+    if (userKeys.anthropic) h["x-user-anthropic-key"] = userKeys.anthropic;
+    if (userKeys.openai) h["x-user-openai-key"] = userKeys.openai;
+    if (userKeys.stability) h["x-user-stability-key"] = userKeys.stability;
+    if (userKeys.fal) h["x-user-fal-key"] = userKeys.fal;
+    if (userKeys.replicate) h["x-user-replicate-key"] = userKeys.replicate;
+    return h;
+  };
+
+  const saveUserKeys = (keys) => {
+    setUserKeys(keys);
+    localStorage.setItem("mythos_user_keys", JSON.stringify(keys));
+  };
+
   useEffect(() => {
-    fetch("/api/models")
+    fetch("/api/models", { headers: byokHeaders() })
       .then(r => r.json())
-      .then(d => setModels(d.models || []))
+      .then(d => {
+        setModels(d.models || []);
+        setBudgetInfo({ remaining: d.remaining ?? 0, limit: d.limit ?? 100, byok: !!d.byok });
+      })
       .catch(() => {});
-  }, [showSettings]);
+  }, [showSettings, userKeys]);
 
   useEffect(() => {
     if (showEngagement) {
@@ -233,7 +255,7 @@ export default function FacelessContentFactory({ user, onLogout }) {
     setTestLoading(true);
     fetch("/api/engagement/generate-reply", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...byokHeaders() },
       body: JSON.stringify({
         platform: "instagram",
         postContent: "5 Tipps wie du dein Export-Business in Afrika startest. Nummer 3 hat bei mir alles verändert!",
@@ -260,7 +282,7 @@ export default function FacelessContentFactory({ user, onLogout }) {
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ modelId: selectedModel, prompt }),
       });
 
@@ -626,12 +648,59 @@ export default function FacelessContentFactory({ user, onLogout }) {
               );
             })}
 
-            <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 10, marginTop: 8 }}>
-              <p style={{ fontSize: 11, color: "#555" }}>
-                Trage deine Schluessel in die <span style={{ color: "#888", fontFamily: "'Space Mono', monospace" }}>.env</span> Datei ein.
-                {" "}⚠️ = noch nicht eingerichtet
-              </p>
+            {/* Budget Info */}
+            <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 10, marginTop: 8, marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 11, color: "#888", fontFamily: "'Space Mono', monospace" }}>
+                  {budgetInfo.byok ? "EIGENE KEYS AKTIV" : `FREEMIUM: ${budgetInfo.remaining}/${budgetInfo.limit} HEUTE`}
+                </span>
+                <span style={{
+                  fontSize: 10, padding: "2px 8px", borderRadius: 8,
+                  background: budgetInfo.byok ? "#2ECC7122" : budgetInfo.remaining > 0 ? "#E8A83822" : "#E74C3C22",
+                  color: budgetInfo.byok ? "#2ECC71" : budgetInfo.remaining > 0 ? "#E8A838" : "#E74C3C",
+                  fontWeight: 700,
+                }}>
+                  {budgetInfo.byok ? "UNBEGRENZT" : budgetInfo.remaining > 0 ? "AKTIV" : "LIMIT ERREICHT"}
+                </span>
+              </div>
             </div>
+
+            {/* BYOK Key Inputs */}
+            <label style={{ fontSize: 12, color: "#888", fontFamily: "'Space Mono', monospace", display: "block", marginBottom: 8 }}>
+              EIGENE API-KEYS (OPTIONAL)
+            </label>
+            <p style={{ fontSize: 11, color: "#555", marginBottom: 10 }}>
+              Eigene Keys eingeben = unbegrenzte Nutzung. Keys bleiben lokal im Browser.
+            </p>
+            {[
+              { key: "anthropic", label: "Anthropic (Claude)", placeholder: "sk-ant-..." },
+              { key: "openai", label: "OpenAI", placeholder: "sk-..." },
+              { key: "stability", label: "Stability AI", placeholder: "sk-stability-..." },
+              { key: "fal", label: "FAL.ai", placeholder: "fal-..." },
+              { key: "replicate", label: "Replicate", placeholder: "r8_..." },
+            ].map(({ key, label, placeholder }) => (
+              <div key={key} style={{ marginBottom: 8 }}>
+                <label style={{ fontSize: 10, color: "#666", fontFamily: "'Space Mono', monospace", display: "block", marginBottom: 3 }}>{label}</label>
+                <input
+                  type="password"
+                  value={userKeys[key] || ""}
+                  onChange={e => saveUserKeys({ ...userKeys, [key]: e.target.value || undefined })}
+                  placeholder={placeholder}
+                  style={{
+                    width: "100%", padding: "7px 10px", borderRadius: 8, boxSizing: "border-box",
+                    background: "rgba(255,255,255,0.03)", border: userKeys[key] ? "1px solid #2ECC7144" : "1px solid rgba(255,255,255,0.08)",
+                    color: "#ccc", fontSize: 12, fontFamily: "'Space Mono', monospace", outline: "none",
+                  }}
+                />
+              </div>
+            ))}
+            {Object.values(userKeys).some(v => !!v) && (
+              <button onClick={() => saveUserKeys({})} className="action-btn" style={{
+                marginTop: 4, padding: "6px 12px", borderRadius: 8,
+                background: "rgba(231,76,60,0.1)", border: "1px solid rgba(231,76,60,0.2)",
+                color: "#E74C3C", fontSize: 11, width: "100%",
+              }}>Alle Keys entfernen</button>
+            )}
 
             <button onClick={() => setShowSettings(false)} className="action-btn" style={{
               marginTop: 10, padding: "8px 16px", borderRadius: 10,
@@ -1161,7 +1230,7 @@ export default function FacelessContentFactory({ user, onLogout }) {
                     <button onClick={() => {
                       setVideoRendering(true); setVideoResult(null);
                       fetch("/api/media/image", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
+                        method: "POST", headers: { "Content-Type": "application/json", ...byokHeaders() },
                         body: JSON.stringify({ topic, style: "cinematic", aspectRatio: videoFormat === "landscape" ? "landscape" : videoFormat === "square" ? "square" : "portrait" }),
                       }).then(r => r.json()).then(d => setVideoResult(d)).finally(() => setVideoRendering(false));
                     }} disabled={videoRendering} className="action-btn" style={{
@@ -1175,7 +1244,7 @@ export default function FacelessContentFactory({ user, onLogout }) {
                     <button onClick={() => {
                       setVideoRendering(true); setVideoResult(null);
                       fetch("/api/media/video", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
+                        method: "POST", headers: { "Content-Type": "application/json", ...byokHeaders() },
                         body: JSON.stringify({
                           prompt: `${result.slice(0, 100)}, cinematic motion, professional, faceless content`,
                           imageUrl: videoResult?.url ? `${videoResult.url}` : undefined,
@@ -1192,7 +1261,7 @@ export default function FacelessContentFactory({ user, onLogout }) {
                     <button onClick={() => {
                       setVideoRendering(true); setVideoResult(null);
                       fetch("/api/media/full-pipeline", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
+                        method: "POST", headers: { "Content-Type": "application/json", ...byokHeaders() },
                         body: JSON.stringify({ content: result, topic, format, aspectRatio: videoFormat === "landscape" ? "landscape" : videoFormat === "square" ? "square" : "portrait" }),
                       }).then(r => r.json()).then(d => setVideoResult(d)).finally(() => setVideoRendering(false));
                     }} disabled={videoRendering} className="action-btn" style={{
