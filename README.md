@@ -1,5 +1,21 @@
 # Mythos — Content Factory
 
+## Quick Deploy
+
+### Railway (empfohlen)
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https://github.com/Rawkeep/Mythos)
+
+### Docker
+```bash
+docker build -t mythos .
+docker run -p 3001:3001 --env-file .env mythos
+```
+
+### Coolify (Self-Hosted)
+Siehe [Deployment-Guide](https://github.com/Rawkeep/deployment)
+
+---
+
 AI-powered social media content engine + post manager. Generate content with AI, upload your own media, schedule posts, and publish to all platforms from one dashboard.
 
 ---
