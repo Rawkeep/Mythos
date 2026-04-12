@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "Preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "5173"],
+      "port": 5173
+    },
+    {
       "name": "Production",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["start"],
